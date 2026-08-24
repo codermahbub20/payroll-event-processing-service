@@ -356,7 +356,92 @@ event does not wedge its employee's queue.
 
 ---
 
-## 9. Enum parity between Prisma and the shared package
+## 9. Failure classification: `UnrecoverableError`, not `job.discard()`
+
+Permanent failures stop retrying by throwing BullMQ's `UnrecoverableError`.
+
+Both mechanisms work — verified against a real Redis that `UnrecoverableError` produces
+exactly **1** attempt where a plain `Error` produces the full **3**. `UnrecoverableError`
+is preferred because:
+
+- **It propagates.** Business validation fails several frames deep inside
+  `applyBusinessEffect`. An exception unwinds naturally; `discard()` would require
+  threading the `job` object down to every site that might decide "permanent".
+- **It keeps the decision in one place.** `discard()` *marks* the job then still needs a
+  throw to end the attempt, so the intent lives in two statements that can drift apart.
+  One throw carries both the outcome and the reason.
+- **It reads correctly in the queue.** The job lands in `failed` with the real error
+  message, which is what an operator inspecting the DLQ needs.
+
+### The three-way outcome
+
+| Situation | Event status | Retries |
+|---|---|---|
+| Business validation failed | `FAILED_PERMANENT` | none — `UnrecoverableError` |
+| Provider returned a non-retryable error | `FAILED_PERMANENT` | none — `UnrecoverableError` |
+| Retryable error, budget remains | stays `PROCESSING` | BullMQ retries with backoff |
+| Retryable error, budget spent | `FAILED_TEMPORARY` | stopped, but re-triggerable |
+
+**Why the row stays `PROCESSING` between retries.** Flapping it to `FAILED_TEMPORARY`
+and back on every attempt would make the audit trail unreadable and break any "how many
+events are currently failing?" dashboard — the count would spike and settle on every
+transient blip. The attempt genuinely *is* still in flight. Each attempt still writes a
+history row (with `willRetry: true`), so nothing is lost from the audit trail.
+
+**Why `FAILED_TEMPORARY` is distinct from `FAILED_PERMANENT`.** It means "we gave up for
+now", not "this can never work". It stays eligible for a manual re-trigger or a
+scheduled sweep, which is why `completedAt` is deliberately left null for it and stamped
+for `FAILED_PERMANENT`.
+
+### Unknown errors are treated as retryable
+
+An unrecognised exception is more likely transient infrastructure than permanently bad
+data. The retry budget bounds the cost of guessing wrong; failing permanently on an
+unknown error would silently discard recoverable payroll changes.
+
+### Validation runs again in the worker
+
+The API already validated the payload at submission, and the worker validates again
+before the provider call. This is not redundant:
+
+- events can sit queued for a long time, and the rules that matter are those in force
+  when the change is *applied*;
+- rows can be written by paths that never touch the DTO layer (backfills, migrations,
+  manual repair);
+- these are *business* rules (IBAN checksums, salary ceilings) rather than request-shape
+  rules, and belong beside the code that acts on them.
+
+The IBAN check is the real ISO 7064 MOD-97-10 algorithm, not a regex — verified against
+valid IBANs from six countries (including 15-character Norwegian and alphanumeric
+French/UK forms) and confirmed to reject single-digit corruptions that a shape check
+would wave through. Salary carries a sanity ceiling because a value above it is far more
+likely a unit error (major units sent as minor) than a real raise, and that mistake is
+expensive to unwind.
+
+### `attemptsMade` is 0-based during execution
+
+Verified directly: a 3-attempt job observes `attemptsMade` as `0, 1, 2`. Logs and the
+"is this the last attempt?" check therefore use `attemptsMade + 1`. An easy off-by-one
+that would either mis-report attempt numbers or give up one retry early.
+
+### Structured logs
+
+Every lifecycle transition emits one JSON line carrying `eventId`, `employeeId`,
+`eventType`, `attempt`, `maxAttempts`, and — on failures — `errorCode` and `willRetry`:
+
+```json
+{"timestamp":"...","level":"warn","event":"processing_failed_temporary",
+ "eventId":"...","employeeId":"...","eventType":"SALARY_CHANGE",
+ "attempt":2,"maxAttempts":3,"errorCode":"DOWNSTREAM_UNAVAILABLE","willRetry":true}
+```
+
+Written straight to stdout rather than through Nest's `Logger`, whose formatter would
+wrap the JSON in ANSI colour codes and a prefix — making it unparseable by a log
+aggregator.
+
+---
+
+## 10. Enum parity between Prisma and the shared package
 
 Prisma generates its enums as string-literal unions; `@payroll/shared` exports real
 TypeScript enums. The values are identical but the types are not mutually assignable, so

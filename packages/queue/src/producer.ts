@@ -7,10 +7,24 @@ import { EmployeeOrdering } from "./employee-ordering";
 import type { Redis } from "./connection";
 
 export interface PayrollEventProducerOptions {
-  /** Retries for transport-level failures. Business retries live in Postgres. */
+  /**
+   * Total attempts per job, including the first. Covers retryable downstream
+   * failures (timeout, 503, rate limit). Permanent failures bypass this
+   * entirely by throwing UnrecoverableError.
+   */
   attempts?: number;
+  /** Base delay for exponential backoff, in ms. */
   backoffMs?: number;
 }
+
+/**
+ * Three attempts with exponential backoff from 1s gives roughly 1s and 2s
+ * waits — long enough to ride out a brief downstream blip, short enough that
+ * a genuinely failing event reaches FAILED_TEMPORARY quickly rather than
+ * occupying its employee's ordering lock for minutes.
+ */
+export const DEFAULT_ATTEMPTS = 3;
+export const DEFAULT_BACKOFF_MS = 1000;
 
 /**
  * Adds payroll events to the queue, recording per-employee ordering as it goes.
@@ -26,8 +40,11 @@ export class PayrollEventProducer {
     this.queue = new Queue<PayrollEventJobData>(PAYROLL_EVENT_QUEUE, {
       connection,
       defaultJobOptions: {
-        attempts: options.attempts ?? 3,
-        backoff: { type: "exponential", delay: options.backoffMs ?? 1000 },
+        attempts: options.attempts ?? DEFAULT_ATTEMPTS,
+        backoff: {
+          type: "exponential",
+          delay: options.backoffMs ?? DEFAULT_BACKOFF_MS,
+        },
         removeOnComplete: 1000,
         removeOnFail: false,
       },

@@ -6,6 +6,16 @@ import { randomUUID } from "node:crypto";
 import { RedisMemoryServer } from "redis-memory-server";
 import { PayrollWorker } from "../src/processor/payroll-worker";
 
+/** Minimal well-formed gateway result for tests that only care about timing. */
+function gatewayResult(extra: Record<string, unknown> = {}) {
+  return {
+    appliedAt: new Date().toISOString(),
+    confirmationId: `pay_test_${Math.random().toString(16).slice(2, 10)}`,
+    latencyMs: 0,
+    ...extra,
+  };
+}
+
 /**
  * End-to-end across the process boundary: the API's producer and the worker's
  * consumer, talking over a real Redis and a real Postgres.
@@ -75,9 +85,10 @@ describe("producer -> consumer (e2e)", () => {
       redisUrl,
       prisma,
       concurrency: 10,
-      applyEffect: async (e) => {
-        processed.push(e.id);
-        return { providerRef: "ref-1" };
+      gateway: { apply: async (e) => {
+        processed.push(e.eventId);
+        return gatewayResult({ providerRef: "ref-1" });
+      },
       },
     });
     await worker.waitUntilReady();
@@ -140,9 +151,10 @@ describe("producer -> consumer (e2e)", () => {
       redisUrl,
       prisma,
       concurrency: 10,
-      applyEffect: async () => {
+      gateway: { apply: async () => {
         effectRuns += 1;
-        return { ok: true };
+        return gatewayResult();
+      },
       },
     });
     await worker.waitUntilReady();

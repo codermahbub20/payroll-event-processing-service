@@ -10,6 +10,16 @@ import { randomUUID } from "node:crypto";
 import { RedisMemoryServer } from "redis-memory-server";
 import { PayrollWorker } from "../src/processor/payroll-worker";
 
+/** Minimal well-formed gateway result for tests that only care about timing. */
+function gatewayResult(extra: Record<string, unknown> = {}) {
+  return {
+    appliedAt: new Date().toISOString(),
+    confirmationId: `pay_test_${Math.random().toString(16).slice(2, 10)}`,
+    latencyMs: 0,
+    ...extra,
+  };
+}
+
 /**
  * Ordering guarantees, verified against a REAL Redis and a REAL Postgres.
  *
@@ -110,16 +120,17 @@ describe("per-employee ordering (e2e)", () => {
       prisma,
       concurrency,
       requeueDelayMs: 20,
-      applyEffect: async (event) => {
+      gateway: { apply: async (event) => {
         const startedAt = Date.now();
-        inFlight.set(event.id, startedAt);
+        inFlight.set(event.eventId, startedAt);
         await new Promise((resolve) => setTimeout(resolve, workDurationMs));
         timeline.push({
-          eventId: event.id,
-          startedAt: inFlight.get(event.id)!,
+          eventId: event.eventId,
+          startedAt: inFlight.get(event.eventId)!,
           finishedAt: Date.now(),
         });
-        return { ok: true };
+        return gatewayResult();
+      },
       },
     });
   }
@@ -220,12 +231,13 @@ describe("per-employee ordering (e2e)", () => {
         prisma,
         concurrency: 10,
         requeueDelayMs: 20,
-        applyEffect: async (event) => {
-          processed.push(event.id);
-          if (event.id === failing) {
+        gateway: { apply: async (event) => {
+          processed.push(event.eventId);
+          if (event.eventId === failing) {
             throw new Error("simulated downstream failure");
           }
-          return { ok: true };
+          return gatewayResult();
+        },
         },
       });
       await worker.waitUntilReady();
@@ -236,12 +248,29 @@ describe("per-employee ordering (e2e)", () => {
           if (Date.now() > deadline) throw new Error("second event never ran");
           await new Promise((r) => setTimeout(r, 25));
         }
+
+        // A plain Error is classified retryable, so the failing event is
+        // retried before it settles. Wait for the budget to be spent rather
+        // than asserting on the mid-retry state.
+        const statusDeadline = Date.now() + 30000;
+        for (;;) {
+          const row = await prisma.payrollEvent.findUniqueOrThrow({
+            where: { id: failing },
+            select: { status: true },
+          });
+          if (row.status === PayrollEventStatus.FAILED_TEMPORARY) break;
+          if (Date.now() > statusDeadline) {
+            throw new Error(`event settled as ${row.status}, not FAILED_TEMPORARY`);
+          }
+          await new Promise((r) => setTimeout(r, 25));
+        }
       } finally {
         await worker.close();
       }
 
       // The failure must not block the employee: the lock is released in a
-      // finally, so the next event still gets its turn.
+      // finally, so the next event still gets its turn — and crucially it does
+      // so without waiting for the failing event's retries to finish.
       expect(processed).toContain(following);
       expect(processed.indexOf(failing)).toBeLessThan(
         processed.indexOf(following),
@@ -382,15 +411,16 @@ describe("per-employee ordering (e2e)", () => {
         redisUrl,
         prisma,
         concurrency: 10,
-        applyEffect: async (event) => {
+        gateway: { apply: async (event) => {
           const row = await prisma.payrollEvent.findUniqueOrThrow({
-            where: { id: event.id },
+            where: { id: event.eventId },
           });
           statusDuringWork = row.status;
           historyDuringWork = await prisma.payrollEventHistory.count({
-            where: { eventId: event.id },
+            where: { eventId: event.eventId },
           });
-          return { ok: true };
+          return gatewayResult();
+        },
         },
       });
       await worker.waitUntilReady();
@@ -437,9 +467,10 @@ describe("per-employee ordering (e2e)", () => {
         redisUrl,
         prisma,
         concurrency: 10,
-        applyEffect: async () => {
+        gateway: { apply: async () => {
           effectRuns += 1;
-          return { ok: true };
+          return gatewayResult();
+        },
         },
       });
       await worker.waitUntilReady();

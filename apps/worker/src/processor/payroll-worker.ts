@@ -49,7 +49,8 @@ export class PayrollWorker {
 
     this.processor = new EventProcessor(options.prisma, this.ordering, {
       requeueDelayMs: options.requeueDelayMs,
-      applyEffect: options.applyEffect,
+      gateway: options.gateway,
+      logger: options.logger,
     });
 
     this.worker = new Worker<PayrollEventJobData, PayrollEventJobResult | undefined>(
