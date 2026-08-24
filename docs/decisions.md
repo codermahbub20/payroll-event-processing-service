@@ -97,11 +97,15 @@ would invite a retry that the idempotency key would collapse anyway, while false
 telling the client their change was lost. The failure is logged at `error` level and the
 row remains `PENDING` for the sweep. *(Covered by an integration test.)*
 
-### Why the job carries only `{ eventId }`
+### Why the job carries only `{ eventId, employeeId }`
 
 The worker re-reads the authoritative row from Postgres. Embedding a payload snapshot in
 the job risks acting on stale data if the event changed after enqueue, and duplicates
 the source of truth.
+
+`employeeId` is the one exception: it is the partition key for per-employee ordering
+(§8), and the ordering lock must be acquired *before* any database read — so it has to
+travel on the job itself.
 
 ### Why `jobId = eventId`
 
@@ -253,7 +257,106 @@ matches, so every 400 this API emits has one parseable shape.
 
 ---
 
-## 8. Enum parity between Prisma and the shared package
+## 8. Per-employee ordering: Redis sequence lock, not BullMQ Flows
+
+**Requirement:** events for the same `employeeId` must process in acceptance order;
+events for different employees must run concurrently.
+
+**Chosen: strategy (a)** — one `payroll-events` queue, plus a per-employee FIFO list and
+lock in Redis.
+
+### Why not Flows (strategy b)
+
+Flows are the wrong shape for this problem, in three compounding ways:
+
+1. **The dependency direction is inverted.** BullMQ processes children *before* parents.
+   Chaining B as a dependent of A therefore runs **B first** — the opposite of what is
+   wanted. Getting A→B ordering requires making A the child of B, i.e. building the tree
+   backwards from the newest event.
+
+2. **A flow tree must be constructed knowing all its children.** Our events arrive one at
+   a time over HTTP, with no way to know whether another event for that employee is
+   seconds away. Appending to an existing tree means tearing it down and rebuilding it
+   on every submission — not atomic against a worker already consuming it.
+
+3. **Unbounded chain growth.** An employee submitting events all day accumulates an
+   ever-deeper tree that is never fully retired, because the root cannot complete until
+   every descendant has.
+
+Flows are designed for fan-in/fan-out with a *known* child set (map-reduce, batch
+completion). They are not a substitute for an open-ended, append-only ordered stream.
+
+### How the sequence lock works
+
+Two Redis structures per employee, both manipulated by Lua scripts so each
+check-then-act is atomic:
+
+| Key | Type | Purpose |
+|---|---|---|
+| `payroll:employee:<id>:queue` | list | FIFO of accepted event ids |
+| `payroll:employee:<id>:lock` | string (TTL) | id of the event currently being processed |
+
+- **Producer** appends the event id to the FIFO *before* adding the BullMQ job, so
+  accepted order is durable even if the enqueue then fails.
+- **Consumer** may only process an event when it is at the **head** of the FIFO and the
+  lock is free. Otherwise the job is deferred.
+- **On completion** (success *or* failure) the lock is released and the head popped in
+  one atomic step, advancing the employee.
+
+Atomicity is the whole point: two workers evaluating "is the lock free?" as separate
+round trips would both see *yes* and both proceed. Every check-then-act therefore lives
+inside a Lua script.
+
+### Concurrency and ordering are decoupled
+
+The worker runs `concurrency: 10`. Ordering does **not** come from limiting concurrency —
+that would serialise *all* employees and destroy throughput. It comes from the lock,
+which is scoped per employee. Ten different employees can be in flight simultaneously
+while each one's events are strictly serialised.
+
+### Deferral uses `moveToDelayed`, not re-`add`
+
+A job whose turn has not come is deferred with `job.moveToDelayed()` followed by
+throwing `DelayedError`.
+
+The obvious alternative — re-`add`ing the job with the same `jobId` — is **silently
+broken**. BullMQ refuses to re-add a `jobId` that is currently active or completed, and
+it does so without error: `add()` returns a plausible-looking `Job` object while nothing
+is actually queued, so the event vanishes. This was found by probing BullMQ directly
+against a real Redis: the first event of each employee processed and everything after it
+disappeared.
+
+`moveToDelayed` is the right primitive because it:
+- keeps the **same** job, so `jobId === eventId` still dedups redeliveries;
+- does **not** consume a retry attempt (`DelayedError` signals a deliberate reschedule,
+  not a failure), so waiting one's turn can never exhaust retries and land a valid event
+  in the DLQ.
+
+### Failure handling
+
+The lock is released in a `finally`. Without that, one failing event would block every
+later event for that employee until the TTL expired. There is a test asserting a failed
+event does not wedge its employee's queue.
+
+### Trade-offs accepted
+
+- **Polling cost.** A waiting job re-checks every ~50 ms rather than being woken. This
+  burns some Redis round trips under a deep per-employee backlog. Acceptable because the
+  expected depth per employee is very small (an employee rarely has more than one or two
+  in-flight payroll changes); a notification-driven wake-up is the optimisation if that
+  ever stops being true.
+- **Lock TTL vs. long jobs.** The lock has a 30 s TTL so a dead worker cannot block an
+  employee forever. A legitimately long job would lose it, so the TTL is refreshed on an
+  interval for the duration of the work.
+- **A second source of truth.** Ordering state lives in Redis while events live in
+  Postgres. If Redis is lost, ordering state is lost — surviving events are still
+  `PENDING` in Postgres and recoverable, but their relative order within an employee
+  would be rebuilt from `created_at` rather than the FIFO. That is the accepted cost of
+  not putting a lock table in the hot path of every job.
+
+---
+
+## 9. Enum parity between Prisma and the shared package
 
 Prisma generates its enums as string-literal unions; `@payroll/shared` exports real
 TypeScript enums. The values are identical but the types are not mutually assignable, so

@@ -203,7 +203,13 @@ export class EventsService {
     // delivery is recoverable; a dangling job pointing at a non-existent row
     // is not.
     try {
-      await this.queue.enqueueEvent({ eventId: created.id });
+      // employeeId is the partition key for per-employee FIFO ordering, so the
+      // producer needs it to record this event's position before the job
+      // becomes visible to a worker.
+      await this.queue.enqueueEvent({
+        eventId: created.id,
+        employeeId: dto.employeeId,
+      });
     } catch (error) {
       this.logger.error(
         `event ${created.id} committed but enqueue failed; it will be recovered by the PENDING sweep`,

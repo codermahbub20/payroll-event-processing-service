@@ -146,7 +146,8 @@ describe("POST /events (e2e)", () => {
         .send(bankAccountBody(employeeId))
         .expect(202);
 
-      expect(queue.jobs).toEqual([{ eventId: res.body.id }]);
+      // employeeId travels with the job as the per-employee ordering key.
+      expect(queue.jobs).toEqual([{ eventId: res.body.id, employeeId }]);
     });
 
     it("accepts the other event types", async () => {
@@ -292,7 +293,7 @@ describe("POST /events (e2e)", () => {
       // The row count is the real assertion: exactly one event exists.
       expect(await prisma.payrollEvent.count({ where: { employeeId } })).toBe(1);
       // And the retry must NOT have produced a second job.
-      expect(queue.jobs).toEqual([{ eventId: first.body.id }]);
+      expect(queue.jobs).toEqual([{ eventId: first.body.id, employeeId }]);
     });
 
     it("dedups on the derived key when no header is supplied", async () => {

@@ -67,6 +67,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # Jobs processed in parallel across DIFFERENT employees. Ordering within
+      # one employee is enforced by the Redis lock, not by this value.
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-10}
     depends_on:
       postgres:
         condition: service_healthy
