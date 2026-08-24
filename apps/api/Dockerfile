@@ -29,7 +29,8 @@ RUN pnpm install --frozen-lockfile --ignore-scripts || pnpm install --ignore-scr
 FROM base AS build
 COPY --from=deps /workspace/node_modules ./node_modules
 COPY --from=deps /workspace/apps/api/node_modules ./apps/api/node_modules
-COPY --from=deps /workspace/packages/shared/node_modules ./packages/shared/node_modules
+# packages/shared is deliberately absent: it has no runtime dependencies, so
+# pnpm creates no node_modules for it and COPY would fail with "not found".
 COPY --from=deps /workspace/packages/database/node_modules ./packages/database/node_modules
 COPY --from=deps /workspace/packages/queue/node_modules ./packages/queue/node_modules
 COPY tsconfig.base.json tsconfig.json ./
@@ -58,7 +59,6 @@ WORKDIR /workspace
 
 COPY --from=prod-deps /workspace/node_modules ./node_modules
 COPY --from=prod-deps /workspace/apps/api/node_modules ./apps/api/node_modules
-COPY --from=prod-deps /workspace/packages/shared/node_modules ./packages/shared/node_modules
 COPY --from=prod-deps /workspace/packages/database/node_modules ./packages/database/node_modules
 COPY --from=prod-deps /workspace/packages/queue/node_modules ./packages/queue/node_modules
 COPY --from=build /workspace/packages/shared/dist ./packages/shared/dist
