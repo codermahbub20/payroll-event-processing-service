@@ -1,0 +1,889 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/events": {
+      "post": {
+        "operationId": "EventsController_create",
+        "summary": "Submit a payroll event",
+        "description": "Validates the event against the schema for its `eventType`, persists it with status PENDING, and enqueues it for asynchronous processing.\n\nIdempotency: supply an `Idempotency-Key` header to make retries safe. If omitted, a key is derived deterministically from the request body (employeeId + eventType + effectiveDate + payload), so an identical resubmission is recognised as a duplicate rather than creating a second event.\n\nReturns **202** when a new event was created, or **200** when the idempotency key was already known — in which case the existing event is returned and no new job is enqueued.\n\nNote on **422**: this endpoint does not use it. Unknown `eventType` and payload/type mismatches are reported as **400**, so clients handle one status code for every request-shape problem, with the specific failure in `details`.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Client-supplied dedup key (max 255 chars). Reuse the same value when retrying a request.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateEventDto"
+              },
+              "examples": {
+                "bankAccountChange": {
+                  "summary": "BANK_ACCOUNT_CHANGE",
+                  "description": "Update an employee's payment account. IBAN is checksum-validated.",
+                  "value": {
+                    "eventType": "BANK_ACCOUNT_CHANGE",
+                    "employeeId": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70",
+                    "effectiveDate": "2026-09-01",
+                    "payload": {
+                      "iban": "DE89370400440532013000"
+                    }
+                  }
+                },
+                "addressChange": {
+                  "summary": "ADDRESS_CHANGE",
+                  "description": "Update an employee's registered address.",
+                  "value": {
+                    "eventType": "ADDRESS_CHANGE",
+                    "employeeId": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70",
+                    "effectiveDate": "2026-09-01",
+                    "payload": {
+                      "street": "Hauptstrasse 1",
+                      "city": "Berlin",
+                      "postalCode": "10115",
+                      "country": "DE"
+                    }
+                  }
+                },
+                "salaryChange": {
+                  "summary": "SALARY_CHANGE",
+                  "description": "Update an employee's salary. `newSalary` is in integer MINOR units (cents): 75,000.00 EUR is 7500000.",
+                  "value": {
+                    "eventType": "SALARY_CHANGE",
+                    "employeeId": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70",
+                    "effectiveDate": "2026-10-01",
+                    "payload": {
+                      "newSalary": 7500000,
+                      "currency": "EUR"
+                    }
+                  }
+                },
+                "invalidSalary": {
+                  "summary": "Invalid — negative salary (returns 400)",
+                  "description": "Demonstrates the error shape. A negative salary fails business validation, so this would also fail permanently in the worker.",
+                  "value": {
+                    "eventType": "SALARY_CHANGE",
+                    "employeeId": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70",
+                    "effectiveDate": "2026-10-01",
+                    "payload": {
+                      "newSalary": -1,
+                      "currency": "EUR"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotency key already seen. The existing event is returned and no new job was enqueued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitEventResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Event accepted, persisted as PENDING and queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmitEventResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed — malformed body, unknown eventType, or a payload that does not match its eventType. Field-level failures are listed in `details`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      },
+      "get": {
+        "operationId": "EventsController_list",
+        "summary": "List payroll events",
+        "description": "Paginated list of submitted events, newest first. All filters are optional and combine with AND.",
+        "parameters": [
+          {
+            "name": "employeeId",
+            "required": false,
+            "in": "query",
+            "description": "Only return events for this employee.",
+            "schema": {
+              "format": "uuid",
+              "example": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70",
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "description": "Only return events in this status.",
+            "schema": {
+              "example": "PENDING",
+              "enum": [
+                "PENDING",
+                "PROCESSING",
+                "SUCCEEDED",
+                "FAILED_TEMPORARY",
+                "FAILED_PERMANENT"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "name": "eventType",
+            "required": false,
+            "in": "query",
+            "description": "Only return events of this type.",
+            "schema": {
+              "example": "SALARY_CHANGE",
+              "enum": [
+                "BANK_ACCOUNT_CHANGE",
+                "ADDRESS_CHANGE",
+                "SALARY_CHANGE"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "required": false,
+            "in": "query",
+            "description": "1-based page number.",
+            "schema": {
+              "minimum": 1,
+              "default": 1,
+              "example": 1,
+              "type": "number"
+            }
+          },
+          {
+            "name": "pageSize",
+            "required": false,
+            "in": "query",
+            "description": "Items per page (max 100).",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "example": 20,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of matching events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEventsDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters (bad UUID, unknown status, etc).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/events/{id}": {
+      "get": {
+        "operationId": "EventsController_findOne",
+        "summary": "Get a payroll event",
+        "description": "Full detail for one event, including its payload and complete status-transition timeline.\n\n`failure` and `result` surface the most recent failing and succeeding transitions respectively, so callers do not have to scan `history` themselves.",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "description": "Event id returned by POST /events.",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The id is not a valid UUID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No event exists with that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "HealthController_check",
+        "summary": "Service health",
+        "description": "Checks Postgres connectivity, Redis connectivity and BullMQ queue reachability. Returns **200** when all are up and **503** when any is down, with a per-dependency breakdown in both cases.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "All dependencies reachable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthReportDto"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one dependency is down.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthReportDto"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "health"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "Payroll Event Processing Service",
+    "description": "Asynchronous processing of payroll change events.\n\n## Flow\n\n1. `POST /events` validates and persists the event as `PENDING`, then enqueues it. It returns immediately — processing is asynchronous.\n2. A worker claims the event, calls the payroll provider, and moves it to `SUCCEEDED`, `FAILED_TEMPORARY` or `FAILED_PERMANENT`.\n3. `GET /events/{id}` shows the current status plus the full transition timeline.\n\n## Idempotency\n\nSubmission is idempotent. Supply an `Idempotency-Key` header, or one is derived from the request body (`employeeId` + `eventType` + `effectiveDate` + `payload`). A repeat submission returns **200** with the original event instead of **202**, and enqueues no new work.\n\n## Ordering\n\nEvents for the same `employeeId` are processed strictly in submission order. Events for different employees process concurrently.\n\nDelivery is at-least-once, but the business effect is at-most-once — see `docs/decisions.md`.",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [
+    {
+      "name": "events",
+      "description": "Submit and inspect payroll events"
+    },
+    {
+      "name": "health",
+      "description": "Liveness and dependency checks"
+    }
+  ],
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local development"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "BankAccountChangePayloadDto": {
+        "type": "object",
+        "properties": {
+          "iban": {
+            "type": "string",
+            "description": "Destination account, validated with an IBAN checksum.",
+            "example": "DE89370400440532013000"
+          }
+        },
+        "required": [
+          "iban"
+        ]
+      },
+      "AddressChangePayloadDto": {
+        "type": "object",
+        "properties": {
+          "street": {
+            "type": "string",
+            "maxLength": 255,
+            "example": "Hauptstrasse 1"
+          },
+          "city": {
+            "type": "string",
+            "maxLength": 128,
+            "example": "Berlin"
+          },
+          "postalCode": {
+            "type": "string",
+            "maxLength": 32,
+            "example": "10115"
+          },
+          "country": {
+            "type": "string",
+            "description": "ISO 3166-1 alpha-2 country code.",
+            "minLength": 2,
+            "maxLength": 2,
+            "example": "DE"
+          }
+        },
+        "required": [
+          "street",
+          "city",
+          "postalCode",
+          "country"
+        ]
+      },
+      "SalaryChangePayloadDto": {
+        "type": "object",
+        "properties": {
+          "newSalary": {
+            "type": "number",
+            "description": "New salary in integer MINOR units (e.g. cents). 75000.00 EUR is 7500000. Integer rather than decimal to avoid floating-point rounding on money.",
+            "minimum": 1,
+            "example": 7500000
+          },
+          "currency": {
+            "type": "string",
+            "description": "ISO 4217 currency code.",
+            "example": "EUR"
+          }
+        },
+        "required": [
+          "newSalary",
+          "currency"
+        ]
+      },
+      "CreateEventDto": {
+        "type": "object",
+        "properties": {
+          "eventType": {
+            "type": "string",
+            "enum": [
+              "BANK_ACCOUNT_CHANGE",
+              "ADDRESS_CHANGE",
+              "SALARY_CHANGE"
+            ],
+            "description": "Determines which schema `payload` is validated against.",
+            "example": "BANK_ACCOUNT_CHANGE"
+          },
+          "employeeId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Employee the change applies to.",
+            "example": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70"
+          },
+          "effectiveDate": {
+            "type": "string",
+            "description": "Calendar date the change takes effect (YYYY-MM-DD). Impossible dates such as 2026-02-30 are rejected.",
+            "example": "2026-09-01"
+          },
+          "payload": {
+            "description": "Type-specific fields. Which schema applies is determined by `eventType`: BANK_ACCOUNT_CHANGE -> { iban }, ADDRESS_CHANGE -> { street, city, postalCode, country }, SALARY_CHANGE -> { newSalary, currency }. Fields belonging to another event type are rejected.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BankAccountChangePayloadDto"
+              },
+              {
+                "$ref": "#/components/schemas/AddressChangePayloadDto"
+              },
+              {
+                "$ref": "#/components/schemas/SalaryChangePayloadDto"
+              }
+            ],
+            "example": {
+              "iban": "DE89370400440532013000"
+            }
+          }
+        },
+        "required": [
+          "eventType",
+          "employeeId",
+          "effectiveDate",
+          "payload"
+        ]
+      },
+      "SubmitEventResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Id of the created (or existing) event.",
+            "example": "9c3a4a1e-2b8d-4c1e-9f4a-3f6d0a2c5a70"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "SUCCEEDED",
+              "FAILED_TEMPORARY",
+              "FAILED_PERMANENT"
+            ],
+            "example": "PENDING"
+          },
+          "duplicate": {
+            "type": "boolean",
+            "description": "True when the idempotency key was already known, meaning this request returned an existing event and enqueued no new work.",
+            "example": false
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "duplicate"
+        ]
+      },
+      "ErrorResponseDto": {
+        "type": "object",
+        "properties": {
+          "statusCode": {
+            "type": "number",
+            "example": 404
+          },
+          "error": {
+            "type": "string",
+            "example": "Not Found"
+          },
+          "message": {
+            "type": "string",
+            "example": "Event 9c3a4a1e-... not found"
+          },
+          "details": {
+            "description": "Field-level validation failures, present on 400 responses.",
+            "example": [
+              "eventType: eventType must be one of: BANK_ACCOUNT_CHANGE, ..."
+            ],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "statusCode",
+          "error",
+          "message"
+        ]
+      },
+      "EventSummaryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "9c3a4a1e-2b8d-4c1e-9f4a-3f6d0a2c5a70"
+          },
+          "eventType": {
+            "type": "string",
+            "enum": [
+              "BANK_ACCOUNT_CHANGE",
+              "ADDRESS_CHANGE",
+              "SALARY_CHANGE"
+            ]
+          },
+          "employeeId": {
+            "type": "string",
+            "format": "uuid",
+            "example": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70"
+          },
+          "effectiveDate": {
+            "type": "string",
+            "description": "Calendar date the change takes effect (YYYY-MM-DD).",
+            "example": "2026-09-01"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "SUCCEEDED",
+              "FAILED_TEMPORARY",
+              "FAILED_PERMANENT"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedProcessingAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When a worker claimed the event; null while PENDING."
+          },
+          "completedAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the event reached a terminal status."
+          },
+          "attemptCount": {
+            "type": "number",
+            "description": "How many processing attempts have been made.",
+            "example": 0
+          }
+        },
+        "required": [
+          "id",
+          "eventType",
+          "employeeId",
+          "effectiveDate",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "attemptCount"
+        ]
+      },
+      "PaginationMetaDto": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "number",
+            "example": 1
+          },
+          "pageSize": {
+            "type": "number",
+            "example": 20
+          },
+          "total": {
+            "type": "number",
+            "description": "Total matching events.",
+            "example": 42
+          },
+          "totalPages": {
+            "type": "number",
+            "description": "Total pages at this page size.",
+            "example": 3
+          },
+          "hasNextPage": {
+            "type": "boolean",
+            "example": true
+          },
+          "hasPreviousPage": {
+            "type": "boolean",
+            "example": false
+          }
+        },
+        "required": [
+          "page",
+          "pageSize",
+          "total",
+          "totalPages",
+          "hasNextPage",
+          "hasPreviousPage"
+        ]
+      },
+      "PaginatedEventsDto": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventSummaryDto"
+            }
+          },
+          "meta": {
+            "$ref": "#/components/schemas/PaginationMetaDto"
+          }
+        },
+        "required": [
+          "data",
+          "meta"
+        ]
+      },
+      "EventHistoryEntryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "previousStatus": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "SUCCEEDED",
+              "FAILED_TEMPORARY",
+              "FAILED_PERMANENT"
+            ],
+            "nullable": true,
+            "description": "Null on the creation entry (null -> PENDING)."
+          },
+          "newStatus": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "SUCCEEDED",
+              "FAILED_TEMPORARY",
+              "FAILED_PERMANENT"
+            ]
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true,
+            "description": "Transition context — error details on failure, downstream response on success."
+          },
+          "actor": {
+            "type": "object",
+            "nullable": true,
+            "description": "What caused the transition — \"api\", \"worker:<id>\".",
+            "example": "worker:1"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "newStatus",
+          "createdAt"
+        ]
+      },
+      "EventDetailDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "example": "9c3a4a1e-2b8d-4c1e-9f4a-3f6d0a2c5a70"
+          },
+          "eventType": {
+            "type": "string",
+            "enum": [
+              "BANK_ACCOUNT_CHANGE",
+              "ADDRESS_CHANGE",
+              "SALARY_CHANGE"
+            ]
+          },
+          "employeeId": {
+            "type": "string",
+            "format": "uuid",
+            "example": "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70"
+          },
+          "effectiveDate": {
+            "type": "string",
+            "description": "Calendar date the change takes effect (YYYY-MM-DD).",
+            "example": "2026-09-01"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "PENDING",
+              "PROCESSING",
+              "SUCCEEDED",
+              "FAILED_TEMPORARY",
+              "FAILED_PERMANENT"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "startedProcessingAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When a worker claimed the event; null while PENDING."
+          },
+          "completedAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the event reached a terminal status."
+          },
+          "attemptCount": {
+            "type": "number",
+            "description": "How many processing attempts have been made.",
+            "example": 0
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Type-specific fields; shape depends on eventType.",
+            "example": {
+              "iban": "DE89370400440532013000"
+            }
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "Idempotency key this event was recorded under.",
+            "example": "derived:3ce6d9c4b37ea9033570..."
+          },
+          "lastError": {
+            "type": "object",
+            "nullable": true,
+            "description": "Most recent error message, denormalised from the event row for quick triage."
+          },
+          "nextAttemptAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When a FAILED_TEMPORARY event becomes eligible for retry."
+          },
+          "failure": {
+            "nullable": true,
+            "description": "Details of the most recent failure, or null if the event has never failed.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventHistoryEntryDto"
+              }
+            ]
+          },
+          "result": {
+            "nullable": true,
+            "description": "Details of the successful completion, or null if not yet succeeded.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventHistoryEntryDto"
+              }
+            ]
+          },
+          "history": {
+            "description": "Full status-transition timeline, oldest first.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventHistoryEntryDto"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "eventType",
+          "employeeId",
+          "effectiveDate",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "attemptCount",
+          "payload",
+          "idempotencyKey",
+          "history"
+        ]
+      },
+      "DependencyCheckDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down"
+            ],
+            "example": "up"
+          },
+          "latencyMs": {
+            "type": "number",
+            "description": "Probe round-trip time.",
+            "example": 3
+          },
+          "error": {
+            "type": "string",
+            "description": "Present when down."
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Probe extras, e.g. queue job counts."
+          }
+        },
+        "required": [
+          "status",
+          "latencyMs"
+        ]
+      },
+      "HealthReportDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "description": "`degraded` when any dependency is down.",
+            "example": "ok"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "uptimeSeconds": {
+            "type": "number",
+            "example": 1234
+          },
+          "checks": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DependencyCheckDto"
+            },
+            "description": "Per-dependency breakdown: postgres, redis, queue."
+          }
+        },
+        "required": [
+          "status",
+          "timestamp",
+          "uptimeSeconds",
+          "checks"
+        ]
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@ import {
 } from "@nestjs/common";
 import {
   ApiBadRequestResponse,
+  ApiBody,
   ApiExtraModels,
   ApiHeader,
   ApiNotFoundResponse,
@@ -24,7 +25,7 @@ import {
   ApiResponse,
   ApiTags,
 } from "@nestjs/swagger";
-import { PayrollEventStatus } from "@payroll/shared";
+import { PayrollEventStatus, PayrollEventType } from "@payroll/shared";
 import type { Response } from "express";
 import { CreateEventDto } from "./dto/create-event.dto";
 import {
@@ -40,6 +41,9 @@ import {
 } from "./dto/payloads.dto";
 import { EventsService } from "./events.service";
 import { MAX_IDEMPOTENCY_KEY_LENGTH } from "./idempotency";
+
+/** Stable employee id used across every documented example. */
+const EXAMPLE_EMPLOYEE_ID = "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70";
 
 /** Response body for POST /events. */
 export class SubmitEventResponse {
@@ -89,7 +93,11 @@ export class EventsController {
       "event.\n\n" +
       "Returns **202** when a new event was created, or **200** when the " +
       "idempotency key was already known — in which case the existing event is " +
-      "returned and no new job is enqueued.",
+      "returned and no new job is enqueued.\n\n" +
+      "Note on **422**: this endpoint does not use it. Unknown `eventType` and " +
+      "payload/type mismatches are reported as **400**, so clients handle one " +
+      "status code for every request-shape problem, with the specific failure " +
+      "in `details`.",
   })
   @ApiHeader({
     name: "Idempotency-Key",
@@ -112,6 +120,63 @@ export class EventsController {
       "Idempotency key already seen. The existing event is returned and no " +
       "new job was enqueued.",
     type: SubmitEventResponse,
+  })
+  // Named examples, one per event type. Without these Swagger UI prefills the
+  // single `example` from the payload schema, so "Try it out" only ever
+  // demonstrates one event type and a reviewer has to guess the other two.
+  @ApiBody({
+    type: CreateEventDto,
+    examples: {
+      bankAccountChange: {
+        summary: "BANK_ACCOUNT_CHANGE",
+        description: "Update an employee's payment account. IBAN is checksum-validated.",
+        value: {
+          eventType: PayrollEventType.BANK_ACCOUNT_CHANGE,
+          employeeId: EXAMPLE_EMPLOYEE_ID,
+          effectiveDate: "2026-09-01",
+          payload: { iban: "DE89370400440532013000" },
+        },
+      },
+      addressChange: {
+        summary: "ADDRESS_CHANGE",
+        description: "Update an employee's registered address.",
+        value: {
+          eventType: PayrollEventType.ADDRESS_CHANGE,
+          employeeId: EXAMPLE_EMPLOYEE_ID,
+          effectiveDate: "2026-09-01",
+          payload: {
+            street: "Hauptstrasse 1",
+            city: "Berlin",
+            postalCode: "10115",
+            country: "DE",
+          },
+        },
+      },
+      salaryChange: {
+        summary: "SALARY_CHANGE",
+        description:
+          "Update an employee's salary. `newSalary` is in integer MINOR units " +
+          "(cents): 75,000.00 EUR is 7500000.",
+        value: {
+          eventType: PayrollEventType.SALARY_CHANGE,
+          employeeId: EXAMPLE_EMPLOYEE_ID,
+          effectiveDate: "2026-10-01",
+          payload: { newSalary: 7500000, currency: "EUR" },
+        },
+      },
+      invalidSalary: {
+        summary: "Invalid — negative salary (returns 400)",
+        description:
+          "Demonstrates the error shape. A negative salary fails business " +
+          "validation, so this would also fail permanently in the worker.",
+        value: {
+          eventType: PayrollEventType.SALARY_CHANGE,
+          employeeId: EXAMPLE_EMPLOYEE_ID,
+          effectiveDate: "2026-10-01",
+          payload: { newSalary: -1, currency: "EUR" },
+        },
+      },
+    },
   })
   @ApiBadRequestResponse({
     description:

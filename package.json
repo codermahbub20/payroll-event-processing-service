@@ -19,7 +19,8 @@
     "db:migrate:generate": "pnpm --filter @payroll/database db:migrate:generate",
     "db:migrate:reset": "pnpm --filter @payroll/database db:migrate:reset",
     "db:seed": "pnpm --filter @payroll/database db:seed",
-    "db:studio": "pnpm --filter @payroll/database db:studio"
+    "db:studio": "pnpm --filter @payroll/database db:studio",
+    "docs:export": "pnpm --filter @payroll/api docs:export"
   },
   "devDependencies": {
     "typescript": "^5.5.4"

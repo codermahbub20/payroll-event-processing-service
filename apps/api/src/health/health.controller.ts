@@ -1,14 +1,16 @@
 import { Controller, Get, HttpStatus, Res } from "@nestjs/common";
 import {
+  ApiExtraModels,
   ApiOperation,
   ApiProperty,
   ApiResponse,
   ApiTags,
+  getSchemaPath,
 } from "@nestjs/swagger";
 import type { Response } from "express";
 import { HealthReport, HealthService } from "./health.service";
 
-class DependencyCheckDto {
+export class DependencyCheckDto {
   @ApiProperty({ enum: ["up", "down"], example: "up" })
   status!: "up" | "down";
 
@@ -27,7 +29,7 @@ class DependencyCheckDto {
   details?: Record<string, unknown>;
 }
 
-class HealthReportDto {
+export class HealthReportDto {
   @ApiProperty({
     enum: ["ok", "degraded"],
     description: "`degraded` when any dependency is down.",
@@ -43,13 +45,16 @@ class HealthReportDto {
 
   @ApiProperty({
     type: "object",
-    additionalProperties: { $ref: "#/components/schemas/DependencyCheckDto" },
+    additionalProperties: { $ref: getSchemaPath(DependencyCheckDto) },
     description: "Per-dependency breakdown: postgres, redis, queue.",
   })
   checks!: Record<string, DependencyCheckDto>;
 }
 
 @ApiTags("health")
+// Reachable only through the hand-written $ref in HealthReportDto.checks, so
+// Swagger's type scanning cannot find it and the $ref would dangle.
+@ApiExtraModels(DependencyCheckDto)
 @Controller("health")
 export class HealthController {
   constructor(private readonly healthService: HealthService) {}
