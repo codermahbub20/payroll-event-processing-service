@@ -1,3 +1,4 @@
+import { ApiProperty, getSchemaPath } from "@nestjs/swagger";
 import { PayrollEventType } from "@payroll/shared";
 import { plainToInstance } from "class-transformer";
 import {
@@ -116,11 +117,22 @@ function IsValidPayloadForEventType(options?: ValidationOptions) {
  * its own required fields and rejects fields belonging to other types.
  */
 export class CreateEventDto {
+  @ApiProperty({
+    enum: PayrollEventType,
+    description:
+      "Determines which schema `payload` is validated against.",
+    example: PayrollEventType.BANK_ACCOUNT_CHANGE,
+  })
   @IsEnum(PayrollEventType, {
     message: `eventType must be one of: ${Object.values(PayrollEventType).join(", ")}`,
   })
   eventType!: PayrollEventType;
 
+  @ApiProperty({
+    format: "uuid",
+    description: "Employee the change applies to.",
+    example: "3f6d0a2c-9c3a-4a1e-9f4a-2b8d6c1e5a70",
+  })
   @IsUUID("4", { message: "employeeId must be a valid UUID" })
   employeeId!: string;
 
@@ -128,12 +140,36 @@ export class CreateEventDto {
    * Calendar date (YYYY-MM-DD) the change takes effect. `strict` rejects
    * impossible dates such as 2026-02-30 that a lenient parser would roll over.
    */
+  @ApiProperty({
+    description:
+      "Calendar date the change takes effect (YYYY-MM-DD). Impossible dates " +
+      "such as 2026-02-30 are rejected.",
+    example: "2026-09-01",
+  })
   @IsDateString(
     { strict: true, strictSeparator: true },
     { message: "effectiveDate must be an ISO-8601 date (YYYY-MM-DD)" },
   )
   effectiveDate!: string;
 
+  /**
+   * Documented as a `oneOf` union: the concrete schema is selected at runtime
+   * by `eventType`, which Swagger cannot infer from the custom validator.
+   */
+  @ApiProperty({
+    description:
+      "Type-specific fields. Which schema applies is determined by `eventType`: " +
+      "BANK_ACCOUNT_CHANGE -> { iban }, " +
+      "ADDRESS_CHANGE -> { street, city, postalCode, country }, " +
+      "SALARY_CHANGE -> { newSalary, currency }. " +
+      "Fields belonging to another event type are rejected.",
+    oneOf: [
+      { $ref: getSchemaPath(BankAccountChangePayloadDto) },
+      { $ref: getSchemaPath(AddressChangePayloadDto) },
+      { $ref: getSchemaPath(SalaryChangePayloadDto) },
+    ],
+    example: { iban: "DE89370400440532013000" },
+  })
   @IsDefined({ message: "payload is required" })
   @IsObject({ message: "payload must be an object" })
   @IsValidPayloadForEventType()

@@ -192,7 +192,68 @@ misdirected payment, and the check is cheap at the API boundary.
 
 ---
 
-## 6. Enum parity between Prisma and the shared package
+## 6. Read endpoints: derived `failure` / `result` fields
+
+`GET /events/:id` returns the full `history` timeline **and** two derived fields,
+`failure` and `result`, holding the most recent failing and succeeding transitions.
+
+The timeline alone would be sufficient — but every consumer (the frontend list, an
+on-call engineer, a support tool) wants the same thing first: *what went wrong, most
+recently*. Making each caller re-implement "reverse the array, find the first
+`FAILED_*`" invites subtly different answers, and the obvious naive version — taking the
+**first** failure — is wrong for an event that failed, retried, and failed again with a
+different error.
+
+Both fields are derived from the **latest** matching transition, and there is a test
+seeding two distinct failures specifically to pin that ordering.
+
+`lastError` on the event row is kept as well: it is the denormalised message for cheap
+triage without joining history, whereas `failure.details` carries the full structured
+context.
+
+### List rows omit `payload`
+
+`GET /events` returns `EventSummaryDto` without the payload; only the detail endpoint
+includes it. Payloads are unbounded `jsonb`, and a 100-row page carrying full bank/address
+details would be both slow and a needless exposure of PII in a view that only renders
+status and dates.
+
+### Pagination ordering
+
+Rows are ordered `createdAt DESC, id DESC`. The `id` tiebreak matters: without it, two
+events sharing a `created_at` have no deterministic order between queries, so the same
+row can appear on two consecutive pages while another is skipped entirely.
+
+---
+
+## 7. OpenAPI: `@ApiResponse` over `@ApiCreatedResponse` for 202
+
+`POST /events` returns **202** (new) or **200** (duplicate) and never 201.
+
+`@ApiCreatedResponse({ status: 202 })` does **not** work — the decorator hardcodes 201
+and ignores the override. This was caught by inspecting the generated document, which
+showed `200, 201, 400` while the endpoint actually returns `200, 202, 400`. The fix is
+the generic `@ApiResponse({ status: HttpStatus.ACCEPTED })`.
+
+This is the failure mode that makes documentation-by-decorator risky: the wrong decorator
+compiles cleanly, passes every endpoint test, and only manifests as documentation that
+lies about the API. `test/swagger.e2e-spec.ts` therefore asserts the generated document
+directly — that the documented status codes match reality, that no `$ref` is dangling,
+and that the polymorphic `payload` renders as a `oneOf` over all three payload schemas.
+
+The payload union needs `@ApiExtraModels` on the controller: those DTOs are reachable
+only through the runtime discriminator, never as a directly-typed parameter, so Swagger's
+type scanning cannot find them and their `$ref`s would otherwise dangle.
+
+### Uniform error bodies
+
+`ParseUUIDPipe` has its own error shape (`{message, error, statusCode}`, no `details`),
+which differs from the global validation pipe's. It is given an `exceptionFactory` that
+matches, so every 400 this API emits has one parseable shape.
+
+---
+
+## 8. Enum parity between Prisma and the shared package
 
 Prisma generates its enums as string-literal unions; `@payroll/shared` exports real
 TypeScript enums. The values are identical but the types are not mutually assignable, so

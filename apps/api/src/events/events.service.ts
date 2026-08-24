@@ -1,12 +1,28 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import {
+  HttpStatus,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from "@nestjs/common";
 import { Prisma } from "@payroll/database";
-import { PayrollEventStatus } from "@payroll/shared";
+import { PayrollEventStatus, PayrollEventType } from "@payroll/shared";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   EVENT_QUEUE,
   EventQueueProducer,
 } from "../queue/event-queue.constants";
 import { CreateEventDto } from "./dto/create-event.dto";
+import {
+  EventDetailDto,
+  EventHistoryEntryDto,
+  EventSummaryDto,
+  PaginatedEventsDto,
+} from "./dto/event-response.dto";
+import {
+  DEFAULT_PAGE_SIZE,
+  ListEventsQueryDto,
+} from "./dto/list-events-query.dto";
 import { deriveIdempotencyKey, normalizeClientKey } from "./idempotency";
 
 export interface SubmitEventResult {
@@ -19,11 +35,71 @@ export interface SubmitEventResult {
 /**
  * Prisma generates its enums as string-literal unions while `@payroll/shared`
  * exports real TypeScript enums. They hold identical values (asserted in
- * events.service.spec.ts), but are not mutually assignable, so the boundary
- * conversion happens here — keeping the Prisma type out of the public API.
+ * __tests__/enum-parity.spec.ts), but are not mutually assignable, so the
+ * boundary conversion happens here — keeping the Prisma type out of the
+ * public API.
  */
 function toSharedStatus(status: string): PayrollEventStatus {
   return status as PayrollEventStatus;
+}
+
+/**
+ * `effective_date` is a Postgres `date`, which the driver hands back as a
+ * Date at UTC midnight. Emitting a full ISO timestamp would let a client in a
+ * negative-offset timezone render it as the previous day — reintroducing
+ * exactly the drift the `date` column type was chosen to avoid. Only the
+ * calendar part is serialised, read in UTC.
+ */
+function toCalendarDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+type PayrollEventRow = {
+  id: string;
+  eventType: string;
+  employeeId: string;
+  effectiveDate: Date;
+  status: string;
+  createdAt: Date;
+  updatedAt: Date;
+  startedProcessingAt: Date | null;
+  completedAt: Date | null;
+  attemptCount: number;
+};
+
+function toSummaryDto(row: PayrollEventRow): EventSummaryDto {
+  return {
+    id: row.id,
+    eventType: row.eventType as PayrollEventType,
+    employeeId: row.employeeId,
+    effectiveDate: toCalendarDate(row.effectiveDate),
+    status: toSharedStatus(row.status),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    startedProcessingAt: row.startedProcessingAt?.toISOString() ?? null,
+    completedAt: row.completedAt?.toISOString() ?? null,
+    attemptCount: row.attemptCount,
+  };
+}
+
+function toHistoryEntryDto(row: {
+  id: string;
+  previousStatus: string | null;
+  newStatus: string;
+  details: unknown;
+  actor: string | null;
+  createdAt: Date;
+}): EventHistoryEntryDto {
+  return {
+    id: row.id,
+    previousStatus: row.previousStatus
+      ? toSharedStatus(row.previousStatus)
+      : null,
+    newStatus: toSharedStatus(row.newStatus),
+    details: (row.details as Record<string, unknown> | null) ?? null,
+    actor: row.actor,
+    createdAt: row.createdAt.toISOString(),
+  };
 }
 
 @Injectable()
@@ -142,6 +218,106 @@ export class EventsService {
       id: created.id,
       status: toSharedStatus(created.status),
       duplicate: false,
+    };
+  }
+
+  /**
+   * Full detail for a single event, including its status-transition timeline.
+   *
+   * Throws NotFoundException for an unknown id — translated to a 404 body by
+   * Nest's exception layer.
+   */
+  async findOne(id: string): Promise<EventDetailDto> {
+    const event = await this.prisma.payrollEvent.findUnique({
+      where: { id },
+      include: {
+        // Oldest first: the timeline reads naturally top-to-bottom, and the
+        // (event_id, created_at) index serves this ordering directly.
+        history: { orderBy: { createdAt: "asc" } },
+      },
+    });
+
+    if (!event) {
+      throw new NotFoundException({
+        statusCode: HttpStatus.NOT_FOUND,
+        error: "Not Found",
+        message: `Event ${id} not found`,
+      });
+    }
+
+    const history = event.history.map(toHistoryEntryDto);
+
+    // Failure/result are surfaced as dedicated fields so a client does not have
+    // to scan the timeline itself. Both are derived from the LATEST matching
+    // transition: an event that failed, retried and failed again should report
+    // the most recent failure, not the first.
+    const failure =
+      [...history]
+        .reverse()
+        .find(
+          (entry) =>
+            entry.newStatus === PayrollEventStatus.FAILED_TEMPORARY ||
+            entry.newStatus === PayrollEventStatus.FAILED_PERMANENT,
+        ) ?? null;
+
+    const result =
+      [...history]
+        .reverse()
+        .find((entry) => entry.newStatus === PayrollEventStatus.SUCCEEDED) ??
+      null;
+
+    return {
+      ...toSummaryDto(event),
+      payload: event.payload as Record<string, unknown>,
+      idempotencyKey: event.idempotencyKey,
+      lastError: event.lastError,
+      nextAttemptAt: event.nextAttemptAt?.toISOString() ?? null,
+      failure,
+      result,
+      history,
+    };
+  }
+
+  /** Paginated, filterable list of events for the submitted-events view. */
+  async findMany(query: ListEventsQueryDto): Promise<PaginatedEventsDto> {
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE;
+
+    // Undefined keys are omitted by Prisma, so absent filters widen the query
+    // rather than matching NULL.
+    const where = {
+      employeeId: query.employeeId,
+      status: query.status,
+      eventType: query.eventType,
+    };
+
+    // Count and page are issued in one round trip; they are independent reads
+    // so there is no ordering requirement between them.
+    const [total, rows] = await this.prisma.$transaction([
+      this.prisma.payrollEvent.count({ where }),
+      this.prisma.payrollEvent.findMany({
+        where,
+        // Newest first — the frontend list shows most-recent submissions at the
+        // top. `id` breaks ties so pagination is stable when two events share a
+        // created_at, which would otherwise let a row appear on two pages.
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ]);
+
+    const totalPages = Math.ceil(total / pageSize);
+
+    return {
+      data: rows.map(toSummaryDto),
+      meta: {
+        page,
+        pageSize,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1 && total > 0,
+      },
     };
   }
 }
