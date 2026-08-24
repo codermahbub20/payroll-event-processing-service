@@ -54,6 +54,13 @@ COPY packages/queue/package.json packages/queue/package.json
 COPY apps/api/package.json apps/api/package.json
 RUN pnpm install --prod --frozen-lockfile --filter @payroll/api... || pnpm install --prod --filter @payroll/api...
 
+# Generate the Prisma client into THIS stage's node_modules. pnpm writes it
+# inside the .pnpm store rather than a top-level node_modules/.prisma, so it
+# cannot be copied across from the build stage as a single directory — running
+# the generator here is both simpler and correct.
+COPY packages/database/prisma packages/database/prisma
+RUN pnpm --filter @payroll/database exec prisma generate
+
 # ---- runtime ----
 FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
@@ -70,9 +77,6 @@ COPY --from=build /workspace/packages/database/package.json ./packages/database/
 COPY --from=build /workspace/packages/queue/dist ./packages/queue/dist
 COPY --from=build /workspace/packages/queue/package.json ./packages/queue/package.json
 COPY --from=build /workspace/packages/database/prisma ./packages/database/prisma
-# The generated Prisma client lives in node_modules/.prisma; carry it over so
-# the runtime image does not need the Prisma CLI to regenerate it.
-COPY --from=build /workspace/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /workspace/apps/api/dist ./apps/api/dist
 COPY --from=build /workspace/apps/api/package.json ./apps/api/package.json
 
