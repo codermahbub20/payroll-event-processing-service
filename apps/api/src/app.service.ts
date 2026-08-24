@@ -1,9 +1,9 @@
 import { Injectable } from "@nestjs/common";
-import { EventStatus } from "@payroll/shared";
+import { PayrollEventStatus } from "@payroll/shared";
 
 @Injectable()
 export class AppService {
   getHello(): string {
-    return `Hello World from Payroll API (default event status: ${EventStatus.PENDING})`;
+    return `Hello World from Payroll API (default event status: ${PayrollEventStatus.PENDING})`;
   }
 }

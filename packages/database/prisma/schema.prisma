@@ -1,0 +1,124 @@
+// Payroll Event Processing Service — database schema.
+// See docs/database-design.md for the rationale behind each table.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PayrollEventType {
+  BANK_ACCOUNT_CHANGE
+  ADDRESS_CHANGE
+  SALARY_CHANGE
+
+  @@map("payroll_event_type")
+}
+
+enum PayrollEventStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED_TEMPORARY
+  FAILED_PERMANENT
+
+  @@map("payroll_event_status")
+}
+
+/// The core event record. One row per submitted payroll change request.
+model PayrollEvent {
+  id            String             @id @default(uuid()) @db.Uuid
+  eventType     PayrollEventType   @map("event_type")
+  employeeId    String             @map("employee_id") @db.Uuid
+  effectiveDate DateTime           @map("effective_date") @db.Date
+  payload       Json               @db.JsonB
+  status        PayrollEventStatus @default(PENDING)
+
+  /// Client-supplied dedup key. Unique, so a retried HTTP POST collapses
+  /// onto the original row instead of creating a second event.
+  idempotencyKey String @map("idempotency_key") @db.VarChar(255)
+
+  /// Incremented on every status transition. Used for optimistic locking so
+  /// two workers cannot both move the same event out of PENDING.
+  version Int @default(0)
+
+  /// Retry bookkeeping for FAILED_TEMPORARY events.
+  attemptCount Int       @default(0) @map("attempt_count")
+  nextAttemptAt DateTime? @map("next_attempt_at") @db.Timestamptz(6)
+  lastError     String?   @map("last_error")
+
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  startedProcessingAt  DateTime? @map("started_processing_at") @db.Timestamptz(6)
+  completedAt          DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  history           PayrollEventHistory[]
+  appliedOperations AppliedOperation[]
+
+  @@unique([idempotencyKey], map: "uq_payroll_events_idempotency_key")
+  // Per-employee ordering: the worker claims the oldest unprocessed event
+  // for an employee, so this index backs the hot "next event for X" query.
+  @@index([employeeId, createdAt], map: "ix_payroll_events_employee_created")
+  // Operational queries: "what is stuck?", "what failed?"
+  @@index([status], map: "ix_payroll_events_status")
+  // Retry sweeps: find due FAILED_TEMPORARY events without scanning all rows.
+  @@index([status, nextAttemptAt], map: "ix_payroll_events_status_next_attempt")
+  @@map("payroll_events")
+}
+
+/// Append-only audit log. One row per status transition, never updated or deleted.
+model PayrollEventHistory {
+  id      String @id @default(uuid()) @db.Uuid
+  eventId String @map("event_id") @db.Uuid
+
+  /// Null for the very first row, which records creation (null -> PENDING).
+  previousStatus PayrollEventStatus? @map("previous_status")
+  newStatus      PayrollEventStatus  @map("new_status")
+
+  /// Free-form transition context: error message + stack for failures,
+  /// downstream response for successes. Kept as jsonb so the shape can
+  /// evolve per event type without a migration.
+  details Json? @db.JsonB
+
+  /// Who/what caused the transition — "api", "worker:<id>", "admin:<user>".
+  actor String? @db.VarChar(255)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  event PayrollEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  // Audit reads are almost always "show me the timeline for this event".
+  @@index([eventId, createdAt], map: "ix_payroll_event_history_event_created")
+  @@map("payroll_event_history")
+}
+
+/// Idempotency ledger guaranteeing at-most-once business effect.
+///
+/// The worker writes the row here in the SAME transaction as the downstream
+/// side effect. The unique constraint on (event_id, operation_key) means a
+/// redelivered event that tries to re-apply the same operation hits a unique
+/// violation and is safely skipped.
+model AppliedOperation {
+  id      String @id @default(uuid()) @db.Uuid
+  eventId String @map("event_id") @db.Uuid
+
+  /// Identifies WHICH effect this row covers. An event that performs several
+  /// distinct side effects gets one row per effect, so a crash midway through
+  /// resumes at the first unapplied one instead of redoing everything.
+  operationKey String @map("operation_key") @db.VarChar(255)
+
+  /// Stored outcome of the effect. On a duplicate delivery we return this
+  /// instead of re-executing, so retries stay observably identical.
+  result Json? @db.JsonB
+
+  appliedAt DateTime @default(now()) @map("applied_at") @db.Timestamptz(6)
+
+  event PayrollEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, operationKey], map: "uq_applied_operations_event_operation")
+  @@index([eventId], map: "ix_applied_operations_event")
+  @@map("applied_operations")
+}

@@ -12,7 +12,14 @@
     "dev:worker": "pnpm --filter @payroll/worker start:dev",
     "dev:frontend": "pnpm --filter @payroll/frontend dev",
     "lint": "pnpm -r lint",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "db:generate": "pnpm --filter @payroll/database db:generate",
+    "db:migrate": "pnpm --filter @payroll/database db:migrate",
+    "db:migrate:dev": "pnpm --filter @payroll/database db:migrate:dev",
+    "db:migrate:generate": "pnpm --filter @payroll/database db:migrate:generate",
+    "db:migrate:reset": "pnpm --filter @payroll/database db:migrate:reset",
+    "db:seed": "pnpm --filter @payroll/database db:seed",
+    "db:studio": "pnpm --filter @payroll/database db:studio"
   },
   "devDependencies": {
     "typescript": "^5.5.4"
