@@ -56,10 +56,14 @@ RUN pnpm install --prod --frozen-lockfile --filter @payroll/api... || pnpm insta
 
 # Generate the Prisma client into THIS stage's node_modules. pnpm writes it
 # inside the .pnpm store rather than a top-level node_modules/.prisma, so it
-# cannot be copied across from the build stage as a single directory — running
-# the generator here is both simpler and correct.
+# cannot be copied across from the build stage as a single directory.
+#
+# `pnpm dlx` rather than `pnpm exec`: the prisma CLI is a devDependency, and
+# unlike npm, pnpm's strict linking does not expose a transitive CLI on PATH
+# after a --prod install. `pnpm add` cannot be used either — it errors with
+# ERR_PNPM_INCLUDED_DEPS_CONFLICT against a prod-only modules directory.
 COPY packages/database/prisma packages/database/prisma
-RUN pnpm --filter @payroll/database exec prisma generate
+RUN cd packages/database && pnpm dlx prisma@5.22.0 generate
 
 # ---- runtime ----
 FROM node:20-alpine AS runtime
