@@ -13,7 +13,12 @@ COPY packages/queue/package.json packages/queue/package.json
 COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/frontend/package.json apps/frontend/package.json
-RUN pnpm install --frozen-lockfile || pnpm install
+# --ignore-scripts: some devDependencies build native binaries in their
+# postinstall (redis-memory-server compiles Redis from source), which fails on
+# alpine — no 'make' — and is pointless here since no image runs tests. The one
+# postinstall that DOES matter, Prisma's client generation, is invoked
+# explicitly by the database package's build script below.
+RUN pnpm install --frozen-lockfile --ignore-scripts || pnpm install --ignore-scripts
 
 # ---- build: compile shared + database + api ----
 FROM base AS build

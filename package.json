@@ -34,5 +34,10 @@
     "globals": "^17.11.0",
     "typescript": "^5.5.4",
     "typescript-eslint": "^8.67.0"
+  },
+  "pnpm": {
+    "neverBuiltDependencies": [
+      "redis-memory-server"
+    ]
   }
 }

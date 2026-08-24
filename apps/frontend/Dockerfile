@@ -13,7 +13,11 @@ COPY apps/worker/package.json apps/worker/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/database/package.json packages/database/package.json
 COPY packages/queue/package.json packages/queue/package.json
-RUN pnpm install --frozen-lockfile || pnpm install
+# --ignore-scripts: some devDependencies build native binaries in their
+# postinstall (redis-memory-server compiles Redis from source), which fails on
+# alpine — no 'make' — and is pointless here since no image runs tests. The
+# frontend build needs no postinstall step of its own.
+RUN pnpm install --frozen-lockfile --ignore-scripts || pnpm install --ignore-scripts
 
 # ---- build ----
 FROM base AS build
