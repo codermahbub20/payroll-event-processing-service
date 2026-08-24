@@ -42,7 +42,7 @@ export class BullEventQueue implements EventQueueProducer, OnModuleDestroy {
    * cannot distinguish "dependency down" from "health check broken".
    */
   async checkHealth(): Promise<QueueHealth> {
-    let redis = false;
+    let redis: boolean;
     try {
       const pong = await this.connection.ping();
       redis = pong === "PONG";

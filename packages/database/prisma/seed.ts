@@ -7,13 +7,11 @@ const prisma = new PrismaClient();
  * ingestion API and worker pipeline are implemented.
  */
 async function main(): Promise<void> {
-  // eslint-disable-next-line no-console
   console.log("[seed] nothing to seed yet");
 }
 
 main()
   .catch((error) => {
-    // eslint-disable-next-line no-console
     console.error("[seed] failed", error);
     process.exit(1);
   })

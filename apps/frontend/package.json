@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview --host --port 4173",
-    "lint": "echo \"no lint configured\""
+    "lint": "eslint src --max-warnings=0",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@payroll/shared": "workspace:^",

@@ -37,7 +37,6 @@ async function exportOpenApi(): Promise<void> {
     const pathCount = Object.keys(document.paths ?? {}).length;
     const schemaCount = Object.keys(document.components?.schemas ?? {}).length;
 
-    // eslint-disable-next-line no-console
     console.log(
       `wrote ${outputPath} (${pathCount} paths, ${schemaCount} schemas)`,
     );
@@ -49,7 +48,6 @@ async function exportOpenApi(): Promise<void> {
 exportOpenApi()
   .then(() => process.exit(0))
   .catch((error) => {
-    // eslint-disable-next-line no-console
     console.error("failed to export OpenAPI document:", error);
     process.exit(1);
   });

@@ -1,5 +1,7 @@
 # Payroll Event Processing Service
 
+[![CI](https://github.com/codermahbub20/payroll-event-processing-service/actions/workflows/ci.yml/badge.svg)](https://github.com/codermahbub20/payroll-event-processing-service/actions/workflows/ci.yml)
+
 Asynchronous processing of payroll change events — submit an event over HTTP, a worker
 applies it against a (simulated) payroll provider, and the UI shows the state change
 happen live.
@@ -152,6 +154,26 @@ packages/
   queue/       BullMQ producer + per-employee ordering primitives
 docs/          decisions.md, database-design.md, api-examples.md, openapi.json
 ```
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](./.github/workflows/ci.yml) runs on every push and pull
+request to `main`:
+
+| Job | What it does |
+|---|---|
+| **Lint & typecheck** | ESLint across the workspace, then `tsc` over every package |
+| **Unit & integration tests** | Postgres + Redis as service containers, migrations applied, full suite with coverage thresholds enforced; coverage uploaded as an artifact |
+| **Production builds** | Builds api, worker and frontend, and fails if `docs/openapi.json` is stale |
+| **Docker images** | Builds all three Dockerfiles (matrix, no push) with layer caching |
+
+Jobs run in parallel and a `ci-status` job aggregates them, so branch protection needs
+one required check rather than an entry per job. Concurrency is capped per branch — a new
+push cancels the previous run.
+
+In CI the tests use the Postgres and Redis **service containers** via `DATABASE_URL` and
+`REDIS_URL`. Locally, where no broker is expected to be running, each suite starts an
+embedded Redis instead, so `pnpm test` works on a clean checkout with no setup.
 
 ## Common commands
 

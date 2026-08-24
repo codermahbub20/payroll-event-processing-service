@@ -51,9 +51,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ...init?.headers,
       },
     });
-  } catch (cause) {
+  } catch {
     // fetch only rejects on network failure, so this is "API unreachable"
-    // rather than an HTTP error — worth saying explicitly.
+    // rather than an HTTP error — worth saying explicitly. The underlying
+    // cause carries no detail worth surfacing (browsers deliberately obscure
+    // it), so it is not bound.
     throw new ApiError(0, {
       statusCode: 0,
       error: "Network Error",

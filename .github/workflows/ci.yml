@@ -1,0 +1,253 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A new push to the same branch cancels the previous run: CI feedback on an
+# outdated commit is wasted compute and misleading status.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+  # Matches the `packageManager` field in package.json.
+  PNPM_VERSION: "9.12.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  lint-and-typecheck:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          # Caches the pnpm store keyed on pnpm-lock.yaml.
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        # tsc needs the generated types; without this the typecheck fails on
+        # every @payroll/database import rather than on a real error.
+        run: pnpm db:generate
+
+      - name: Run ESLint
+        run: pnpm lint
+
+      - name: Type-check all workspace packages
+        run: pnpm typecheck
+
+  # ---------------------------------------------------------------------------
+  test:
+    name: Unit & integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: payroll
+          POSTGRES_PASSWORD: payroll
+          POSTGRES_DB: payroll
+        ports:
+          - 5432:5432
+        # The job must not start querying before Postgres accepts connections.
+        options: >-
+          --health-cmd "pg_isready -U payroll -d payroll"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://payroll:payroll@localhost:5432/payroll
+      REDIS_URL: redis://localhost:6379
+      NODE_ENV: test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Apply database migrations
+        run: pnpm db:migrate
+
+      - name: Build workspace packages
+        # api and worker import @payroll/shared, @payroll/database and
+        # @payroll/queue. Jest maps those to source, but building first proves
+        # the packages compile before 250+ tests run against them.
+        run: pnpm -r --filter "./packages/*" build
+
+      - name: Run API tests with coverage
+        run: pnpm --filter @payroll/api test:coverage
+
+      - name: Run worker tests with coverage
+        # Includes the e2e suite (HTTP -> queue -> worker -> DB).
+        run: pnpm --filter @payroll/worker test:coverage
+
+      - name: Upload coverage reports
+        # Runs even when tests fail — a failed run's coverage is often the
+        # fastest way to see which area regressed.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            apps/api/coverage/
+            apps/worker/coverage/
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: Production builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm db:generate
+
+      - name: Build shared packages
+        run: pnpm -r --filter "./packages/*" build
+
+      - name: Build API
+        run: pnpm --filter @payroll/api build
+
+      - name: Build worker
+        run: pnpm --filter @payroll/worker build
+
+      - name: Build frontend
+        run: pnpm --filter @payroll/frontend build
+
+      - name: Verify the committed OpenAPI spec is current
+        # docs/openapi.json is generated. If a decorator changed without a
+        # re-export, the committed spec is stale — catch it here rather than
+        # letting a reviewer read a spec that no longer matches the code.
+        run: |
+          pnpm docs:export
+          git diff --exit-code --stat docs/openapi.json \
+            || (echo "::error::docs/openapi.json is out of date — run 'pnpm docs:export' and commit the result" && exit 1)
+
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only worth the minutes once the code itself is known good.
+    needs: [lint-and-typecheck]
+
+    strategy:
+      # Report every broken Dockerfile in one run, not just the first.
+      fail-fast: false
+      matrix:
+        include:
+          - service: api
+            dockerfile: apps/api/Dockerfile
+          - service: worker
+            dockerfile: apps/worker/Dockerfile
+          - service: frontend
+            dockerfile: apps/frontend/Dockerfile
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          # Build only — no registry push. This job answers "does it build?",
+          # which is what breaks most often in a monorepo where a Dockerfile
+          # has to copy exactly the right set of workspace packages.
+          push: false
+          load: false
+          tags: payroll-${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # ---------------------------------------------------------------------------
+  ci-status:
+    name: CI status
+    runs-on: ubuntu-latest
+    # Aggregates the matrix and parallel jobs into one required check, so
+    # branch protection needs a single entry rather than being updated every
+    # time a job is added.
+    needs: [lint-and-typecheck, test, build, docker-build]
+    if: always()
+
+    steps:
+      - name: Fail if any job did not succeed
+        run: |
+          echo "lint-and-typecheck: ${{ needs.lint-and-typecheck.result }}"
+          echo "test:               ${{ needs.test.result }}"
+          echo "build:              ${{ needs.build.result }}"
+          echo "docker-build:       ${{ needs.docker-build.result }}"
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "::error::One or more CI jobs failed"
+            exit 1
+          fi

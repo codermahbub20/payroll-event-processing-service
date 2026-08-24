@@ -65,9 +65,9 @@ export class StructuredLogger {
    * record, so callers do not repeat them at each site.
    */
   child(context: string, bindings: BaseLogFields = {}): StructuredLogger {
-    const parent = this;
     const child = new StructuredLogger({
-      write: (line) => parent.writeLine(line),
+      // Arrow function, so `this` is the parent lexically — no aliasing needed.
+      write: (line) => this.writeLine(line),
       service: this.service,
       context,
       minLevel: this.minLevel,
