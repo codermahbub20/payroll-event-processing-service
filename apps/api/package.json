@@ -12,10 +12,12 @@
     "lint": "echo \"no lint configured\"",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:unit": "jest --testPathPatterns=src/",
-    "test:e2e": "jest --testPathPatterns=test/ --runInBand",
+    "test:unit": "jest --testPathPatterns=\".spec.ts$\"",
+    "test:e2e": "jest --testPathPatterns=\"e2e-spec\" --runInBand",
     "test:cov": "jest --coverage",
-    "docs:export": "ts-node -P tsconfig.spec.json scripts/export-openapi.ts"
+    "docs:export": "ts-node -P tsconfig.spec.json scripts/export-openapi.ts",
+    "test:integration": "jest --testPathPatterns=\"integration-spec\" --runInBand",
+    "test:coverage": "jest --coverage --runInBand"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.4",

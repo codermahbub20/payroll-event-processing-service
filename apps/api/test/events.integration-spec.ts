@@ -34,7 +34,7 @@ class RecordingQueue implements EventQueueProducer {
 
 const VALID_IBAN = "DE89370400440532013000";
 
-describe("POST /events (e2e)", () => {
+describe("[integration] POST /events", () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let queue: RecordingQueue;

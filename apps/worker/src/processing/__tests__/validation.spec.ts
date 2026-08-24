@@ -10,7 +10,7 @@ import {
   validateSalaryChange,
 } from "../validation";
 
-describe("isValidIbanChecksum", () => {
+describe("[unit] isValidIbanChecksum", () => {
   // Real IBANs spanning the length range (Norway 15, Malta-style long) and
   // both numeric and alphanumeric BBANs.
   it.each([
@@ -55,7 +55,7 @@ describe("isValidIbanChecksum", () => {
   });
 });
 
-describe("validateBankAccountChange", () => {
+describe("[unit] validateBankAccountChange", () => {
   it("accepts a valid payload", () => {
     expect(
       validateBankAccountChange({ iban: "DE89370400440532013000" }),
@@ -91,7 +91,7 @@ describe("validateBankAccountChange", () => {
   });
 });
 
-describe("validateAddressChange", () => {
+describe("[unit] validateAddressChange", () => {
   const valid = {
     street: "Hauptstrasse 1",
     city: "Berlin",
@@ -149,7 +149,7 @@ describe("validateAddressChange", () => {
   });
 });
 
-describe("validateSalaryChange", () => {
+describe("[unit] validateSalaryChange", () => {
   const valid = { newSalary: 7500000, currency: "EUR" };
 
   it("accepts a valid payload", () => {
@@ -215,7 +215,7 @@ describe("validateSalaryChange", () => {
   });
 });
 
-describe("validatePayload dispatch", () => {
+describe("[unit] validatePayload dispatch", () => {
   it.each([
     [
       PayrollEventType.BANK_ACCOUNT_CHANGE,
@@ -246,7 +246,7 @@ describe("validatePayload dispatch", () => {
   });
 });
 
-describe("assertValidPayload", () => {
+describe("[unit] assertValidPayload", () => {
   it("returns silently for a valid payload", () => {
     expect(() =>
       assertValidPayload(PayrollEventType.SALARY_CHANGE, {

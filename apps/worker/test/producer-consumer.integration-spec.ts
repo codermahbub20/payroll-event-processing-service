@@ -3,7 +3,7 @@ import { PayrollEventProducer, createRedisConnection } from "@payroll/queue";
 import type { Redis } from "@payroll/queue";
 import { PayrollEventStatus, PayrollEventType } from "@payroll/shared";
 import { randomUUID } from "node:crypto";
-import { RedisMemoryServer } from "redis-memory-server";
+import { startRedis, type RedisFixture } from "./redis-fixture";
 import { PayrollWorker } from "../src/processor/payroll-worker";
 
 /** Minimal well-formed gateway result for tests that only care about timing. */
@@ -23,8 +23,8 @@ function gatewayResult(extra: Record<string, unknown> = {}) {
  * The ordering suite exercises the worker in isolation; this one proves the
  * two halves actually agree on the queue name and job payload contract.
  */
-describe("producer -> consumer (e2e)", () => {
-  let redisServer: RedisMemoryServer;
+describe("[integration] producer -> consumer", () => {
+  let redisFixture: RedisFixture;
   let redisUrl: string;
   let connection: Redis;
   let producer: PayrollEventProducer;
@@ -32,10 +32,8 @@ describe("producer -> consumer (e2e)", () => {
   const employees: string[] = [];
 
   beforeAll(async () => {
-    redisServer = new RedisMemoryServer({});
-    const host = await redisServer.getHost();
-    const port = await redisServer.getPort();
-    redisUrl = `redis://${host}:${port}`;
+    redisFixture = await startRedis();
+    redisUrl = redisFixture.url;
 
     connection = createRedisConnection(redisUrl);
     producer = new PayrollEventProducer(connection);
@@ -61,7 +59,7 @@ describe("producer -> consumer (e2e)", () => {
     await producer.close();
     await connection.quit();
     await prisma.$disconnect();
-    await redisServer.stop();
+    await redisFixture.stop();
   });
 
   it("carries an event from producer to worker and to a terminal status", async () => {

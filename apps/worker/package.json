@@ -11,7 +11,11 @@
     "start:prod": "node dist/main.js",
     "lint": "echo \"no lint configured\"",
     "test": "jest",
-    "test:e2e": "jest --testPathPatterns=test/ --runInBand --forceExit"
+    "test:e2e": "jest --testPathPatterns=\"e2e-spec\" --runInBand --forceExit",
+    "test:unit": "jest --testPathPatterns=\".spec.ts$\"",
+    "test:integration": "jest --testPathPatterns=\"integration-spec\" --runInBand --forceExit",
+    "test:coverage": "jest --coverage --runInBand --forceExit",
+    "test:watch": "jest --watch"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.4",
@@ -26,11 +30,14 @@
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.5",
+    "@nestjs/testing": "^10.4.4",
     "@types/jest": "^30.0.0",
     "@types/node": "^20.14.15",
+    "@types/supertest": "^7.2.1",
     "jest": "^30.4.2",
     "redis-memory-server": "^0.17.1",
     "rimraf": "^5.0.5",
+    "supertest": "^7.2.2",
     "ts-jest": "^29.4.12",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.4"

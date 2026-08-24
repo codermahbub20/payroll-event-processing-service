@@ -48,7 +48,7 @@ class FakeQueue implements EventQueueProducer {
   }
 }
 
-describe("GET /health (e2e)", () => {
+describe("[integration] GET /health", () => {
   let app: INestApplication;
   let queue: FakeQueue;
   let prisma: PrismaService;

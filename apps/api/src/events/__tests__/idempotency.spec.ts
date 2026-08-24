@@ -12,7 +12,7 @@ function dto(overrides: Partial<CreateEventDto> = {}): CreateEventDto {
   } as CreateEventDto;
 }
 
-describe("deriveIdempotencyKey", () => {
+describe("[unit] deriveIdempotencyKey", () => {
   it("is deterministic for identical input", () => {
     expect(deriveIdempotencyKey(dto())).toBe(deriveIdempotencyKey(dto()));
   });
@@ -43,7 +43,7 @@ describe("deriveIdempotencyKey", () => {
   });
 });
 
-describe("normalizeClientKey", () => {
+describe("[unit] normalizeClientKey", () => {
   it.each([
     ["undefined", undefined],
     ["an empty string", ""],

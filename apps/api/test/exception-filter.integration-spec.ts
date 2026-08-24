@@ -2,8 +2,11 @@ import {
   BadRequestException,
   Controller,
   Get,
+  HttpException,
+  HttpStatus,
   INestApplication,
   NotFoundException,
+  Param,
 } from "@nestjs/common";
 import { Test, TestingModule } from "@nestjs/testing";
 import { StructuredLogger } from "@payroll/shared";
@@ -42,9 +45,29 @@ class BoomController {
     // Not an Error instance — the filter must still produce a valid body.
     throw "something went wrong";
   }
+
+  /** Drives the status-name lookup table with an arbitrary code. */
+  @Get("status/:code")
+  byStatus(@Param("code") code: string): never {
+    throw new HttpException("triggered", Number(code));
+  }
+
+  /** Nest's pipes sometimes put an array in `message`. */
+  @Get("array-message")
+  arrayMessage(): never {
+    throw new BadRequestException({
+      message: ["first problem", "second problem"],
+    });
+  }
+
+  /** An object body with no `message` key at all. */
+  @Get("object-no-message")
+  objectNoMessage(): never {
+    throw new HttpException({ somethingElse: true }, HttpStatus.CONFLICT);
+  }
 }
 
-describe("AllExceptionsFilter (e2e)", () => {
+describe("[integration] AllExceptionsFilter", () => {
   let app: INestApplication;
   const logs: Record<string, unknown>[] = [];
 
@@ -161,5 +184,51 @@ describe("AllExceptionsFilter (e2e)", () => {
     expect(res.body).toMatchObject({ statusCode: 404, error: "Not Found" });
     expect(res.body.path).toBe("/does-not-exist");
     expect(res.body.timestamp).toBeDefined();
+  });
+
+  describe("status-code normalisation", () => {
+    it.each([
+      [401, "Unauthorized"],
+      [403, "Forbidden"],
+      [409, "Conflict"],
+      [422, "Unprocessable Entity"],
+      [429, "Too Many Requests"],
+      [503, "Service Unavailable"],
+    ])("names %i as %s", async (status, expected) => {
+      const res = await request(app.getHttpServer())
+        .get(`/boom/status/${status}`)
+        .expect(status);
+
+      expect(res.body.error).toBe(expected);
+      expect(res.body.statusCode).toBe(status);
+    });
+
+    it("falls back to a generic name for an unmapped status", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/boom/status/418")
+        .expect(418);
+
+      expect(res.body.error).toBe("Error");
+    });
+
+    it("flattens an array message into one string", async () => {
+      // Nest's pipes sometimes put an array in `message`; the filter must
+      // normalise it rather than emitting an array where clients expect text.
+      const res = await request(app.getHttpServer())
+        .get("/boom/array-message")
+        .expect(400);
+
+      expect(typeof res.body.message).toBe("string");
+      expect(res.body.message).toBe("first problem; second problem");
+    });
+
+    it("keeps a message when the body object supplies none", async () => {
+      const res = await request(app.getHttpServer())
+        .get("/boom/object-no-message")
+        .expect(409);
+
+      expect(res.body.error).toBe("Conflict");
+      expect(res.body.message).toBeTruthy();
+    });
   });
 });

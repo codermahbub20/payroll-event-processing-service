@@ -11,7 +11,7 @@
     "dev:api": "pnpm --filter @payroll/api start:dev",
     "dev:worker": "pnpm --filter @payroll/worker start:dev",
     "dev:frontend": "pnpm --filter @payroll/frontend dev",
-    "lint": "pnpm -r lint",
+    "lint": "eslint .",
     "test": "pnpm -r test",
     "db:generate": "pnpm --filter @payroll/database db:generate",
     "db:migrate": "pnpm --filter @payroll/database db:migrate",
@@ -20,9 +20,19 @@
     "db:migrate:reset": "pnpm --filter @payroll/database db:migrate:reset",
     "db:seed": "pnpm --filter @payroll/database db:seed",
     "db:studio": "pnpm --filter @payroll/database db:studio",
-    "docs:export": "pnpm --filter @payroll/api docs:export"
+    "docs:export": "pnpm --filter @payroll/api docs:export",
+    "test:unit": "pnpm -r test:unit",
+    "test:integration": "pnpm -r test:integration",
+    "test:e2e": "pnpm --filter @payroll/worker test:e2e",
+    "test:coverage": "pnpm -r test:coverage",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc -b tsconfig.json --pretty false && pnpm --filter @payroll/frontend typecheck"
   },
   "devDependencies": {
-    "typescript": "^5.5.4"
+    "@eslint/js": "^10.0.1",
+    "eslint": "^9",
+    "globals": "^17.11.0",
+    "typescript": "^5.5.4",
+    "typescript-eslint": "^8.67.0"
   }
 }

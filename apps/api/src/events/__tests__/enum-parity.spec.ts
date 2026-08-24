@@ -15,7 +15,7 @@ import {
  * in packages/shared (or vice versa), this fails instead of the mismatch
  * surfacing as a runtime bug on the write path.
  */
-describe("enum parity between @payroll/database and @payroll/shared", () => {
+describe("[unit] enum parity between @payroll/database and @payroll/shared", () => {
   it("PayrollEventStatus has identical values", () => {
     expect(Object.values(SharedStatus).sort()).toEqual(
       Object.values(DbStatus).sort(),

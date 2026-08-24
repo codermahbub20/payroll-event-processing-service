@@ -16,7 +16,7 @@ const request = {
   payload: { newSalary: 1000, currency: "EUR" },
 };
 
-describe("error classification", () => {
+describe("[unit] error classification", () => {
   it("marks temporary errors retryable", () => {
     const error = new TemporaryProcessingError("timeout", "DOWNSTREAM_TIMEOUT");
     expect(error.retryable).toBe(true);
@@ -59,7 +59,7 @@ describe("error classification", () => {
   });
 });
 
-describe("SimulatedPayrollGateway", () => {
+describe("[unit] SimulatedPayrollGateway", () => {
   it("returns a result with confirmationId and appliedAt when healthy", async () => {
     const gateway = new SimulatedPayrollGateway({
       temporaryFailureRate: 0,

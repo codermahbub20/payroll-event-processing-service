@@ -18,7 +18,7 @@ import { buildOpenApiConfig } from "../src/common/swagger";
  * Builds the real AppModule (not a hand-assembled subset) so the comparison
  * covers every route the running server actually exposes.
  */
-describe("committed docs/openapi.json", () => {
+describe("[integration] committed docs/openapi.json", () => {
   let app: INestApplication;
   let live: OpenAPIObject;
   let exported: OpenAPIObject;

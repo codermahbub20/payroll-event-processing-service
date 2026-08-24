@@ -3,7 +3,7 @@ import { PayrollEventProducer, createRedisConnection } from "@payroll/queue";
 import type { Redis } from "@payroll/queue";
 import { PayrollEventStatus, PayrollEventType } from "@payroll/shared";
 import { randomUUID } from "node:crypto";
-import { RedisMemoryServer } from "redis-memory-server";
+import { startRedis, type RedisFixture } from "./redis-fixture";
 import {
   PermanentProcessingError,
   TemporaryProcessingError,
@@ -20,10 +20,10 @@ import { PayrollWorker } from "../src/processor/payroll-worker";
  * Postgres. The retry mechanics live in BullMQ's Lua scripts, so a fake queue
  * would prove nothing about them.
  */
-describe("retry and failure classification (e2e)", () => {
+describe("[integration] retry and failure classification", () => {
   const ATTEMPTS = 3;
 
-  let redisServer: RedisMemoryServer;
+  let redisFixture: RedisFixture;
   let redisUrl: string;
   let connection: Redis;
   let producer: PayrollEventProducer;
@@ -31,10 +31,8 @@ describe("retry and failure classification (e2e)", () => {
   const employees: string[] = [];
 
   beforeAll(async () => {
-    redisServer = new RedisMemoryServer({});
-    const host = await redisServer.getHost();
-    const port = await redisServer.getPort();
-    redisUrl = `redis://${host}:${port}`;
+    redisFixture = await startRedis();
+    redisUrl = redisFixture.url;
 
     connection = createRedisConnection(redisUrl);
     producer = new PayrollEventProducer(connection, {
@@ -65,7 +63,7 @@ describe("retry and failure classification (e2e)", () => {
     await producer.close();
     await connection.quit();
     await prisma.$disconnect();
-    await redisServer.stop();
+    await redisFixture.stop();
   });
 
   beforeEach(async () => {

@@ -21,7 +21,7 @@ const base = {
   effectiveDate: "2026-09-01",
 };
 
-describe("CreateEventDto", () => {
+describe("[unit] CreateEventDto validation", () => {
   describe("BANK_ACCOUNT_CHANGE", () => {
     const eventType = PayrollEventType.BANK_ACCOUNT_CHANGE;
 

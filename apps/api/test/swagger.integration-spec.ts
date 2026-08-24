@@ -27,7 +27,7 @@ class NoopQueue implements EventQueueProducer {
  * parts that are easy to get silently wrong — notably that the documented
  * status codes match what the controller actually returns.
  */
-describe("OpenAPI document", () => {
+describe("[integration] OpenAPI document", () => {
   let app: INestApplication;
   let doc: OpenAPIObject;
 

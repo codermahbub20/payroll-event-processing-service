@@ -24,7 +24,7 @@ class NoopQueue implements EventQueueProducer {
   }
 }
 
-describe("GET /events and GET /events/:id (e2e)", () => {
+describe("[integration] GET /events and GET /events/:id", () => {
   let app: INestApplication;
   let prisma: PrismaService;
 
