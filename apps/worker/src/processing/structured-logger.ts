@@ -13,7 +13,11 @@ export type ProcessingLogEvent =
   | "processing_failed_temporary"
   | "processing_failed_permanent"
   | "processing_deferred"
-  | "processing_skipped";
+  | "processing_skipped"
+  /** A redelivered event whose effect was already applied. */
+  | "duplicate_delivery_skipped"
+  /** Recovery sweep found an event stuck in PROCESSING. */
+  | "stuck_event_recovered";
 
 export interface ProcessingLogFields {
   event: ProcessingLogEvent;

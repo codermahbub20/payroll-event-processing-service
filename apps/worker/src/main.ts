@@ -2,8 +2,19 @@ import "reflect-metadata";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { prisma } from "@payroll/database";
+import {
+  EmployeeOrdering,
+  PayrollEventProducer,
+  createRedisConnection,
+} from "@payroll/queue";
 import { SimulatedPayrollGateway } from "./processing/payroll-gateway";
 import { PayrollWorker, DEFAULT_CONCURRENCY } from "./processor/payroll-worker";
+import {
+  DEFAULT_STUCK_TIMEOUT_MS,
+  DEFAULT_SWEEP_INTERVAL_MS,
+  RecoverySweep,
+  ScheduledRecoverySweep,
+} from "./processor/recovery-sweep";
 import { WorkerModule } from "./worker.module";
 
 /** Reads a numeric env var, falling back when unset or unparseable. */
@@ -45,13 +56,46 @@ async function bootstrap() {
   });
   await worker.waitUntilReady();
 
+  // Recovery sweep: catches events abandoned in PROCESSING that BullMQ's own
+  // stalled detection cannot see (queue data lost, stall budget exhausted,
+  // enqueue that never happened). Runs once at startup, then on an interval.
+  const sweepConnection = createRedisConnection(redisUrl);
+  const sweepProducer = new PayrollEventProducer(sweepConnection);
+  const sweep = new RecoverySweep(
+    prisma,
+    sweepProducer,
+    new EmployeeOrdering(sweepConnection),
+    {
+      stuckTimeoutMs: numberFromEnv(
+        "RECOVERY_STUCK_TIMEOUT_MS",
+        DEFAULT_STUCK_TIMEOUT_MS,
+      ),
+    },
+  );
+  const scheduledSweep = new ScheduledRecoverySweep(
+    sweep,
+    numberFromEnv("RECOVERY_SWEEP_INTERVAL_MS", DEFAULT_SWEEP_INTERVAL_MS),
+    (error) => logger.error(`recovery sweep failed: ${String(error)}`),
+  );
+
+  const startupSweep = await scheduledSweep.start();
+  if (startupSweep.scanned > 0) {
+    logger.warn(
+      `startup sweep recovered ${startupSweep.reEnqueued} and parked ` +
+        `${startupSweep.markedFailed} of ${startupSweep.scanned} stuck events`,
+    );
+  }
+
   logger.log(`worker started (concurrency=${concurrency})`);
 
   // Drain in-flight jobs before exiting so a deploy does not abandon work
   // mid-transaction and leave an employee's lock held until its TTL expires.
   const shutdown = async (signal: string) => {
     logger.log(`${signal} received; draining`);
+    scheduledSweep.stop();
     await worker.close();
+    await sweepProducer.close();
+    await sweepConnection.quit();
     await prisma.$disconnect();
     process.exit(0);
   };

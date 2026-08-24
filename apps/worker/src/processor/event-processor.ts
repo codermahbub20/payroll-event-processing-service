@@ -140,20 +140,28 @@ export class EventProcessor {
       return { eventId, status: "MISSING" };
     }
 
-    // Terminal events are never reprocessed. Cheap guard; the
-    // applied_operations ledger below is the authoritative one.
+    // PROCESSING MARKER CHECK — the first line of defence against a
+    // redelivered event.
+    //
+    // If the event already reached a terminal status, a previous delivery
+    // completed the whole flow: provider called, ledger written, status
+    // committed. Short-circuit here so the external system is never called a
+    // second time. This runs BEFORE markProcessing, so a duplicate delivery
+    // does not even perturb the row.
     if (
       event.status === PayrollEventStatus.SUCCEEDED ||
       event.status === PayrollEventStatus.FAILED_PERMANENT
     ) {
       this.logger.log({
-        event: "processing_skipped",
+        event: "duplicate_delivery_skipped",
         eventId,
         employeeId,
         eventType: event.eventType,
         attempt,
         reason: "already_terminal",
         currentStatus: event.status,
+        message:
+          "duplicate delivery detected, skipping re-application of the business effect",
       });
       return { eventId, status: event.status, alreadyApplied: true };
     }
@@ -172,14 +180,33 @@ export class EventProcessor {
     const startedAt = Date.now();
 
     try {
-      const result = await this.applyBusinessEffect({
+      const { result, alreadyApplied } = await this.applyBusinessEffect({
         eventId: event.id,
         employeeId: event.employeeId,
         eventType: event.eventType,
         payload: event.payload,
       });
 
-      await this.markSucceeded(eventId, result);
+      if (alreadyApplied) {
+        // Crash-recovery path: a previous delivery reached the provider and
+        // committed the ledger row, then died before the event was marked
+        // SUCCEEDED. The effect must NOT be re-applied; we only finish the
+        // transition the dead worker never got to.
+        this.logger.log({
+          event: "duplicate_delivery_skipped",
+          eventId,
+          employeeId,
+          eventType: event.eventType,
+          attempt,
+          maxAttempts,
+          reason: "effect_already_applied",
+          message:
+            "duplicate delivery detected, skipping re-application of the business effect",
+          confirmationId: result.confirmationId,
+        });
+      }
+
+      await this.commitSuccess(eventId, result, alreadyApplied);
 
       this.logger.log({
         event: "processing_succeeded",
@@ -190,9 +217,14 @@ export class EventProcessor {
         maxAttempts,
         durationMs: Date.now() - startedAt,
         confirmationId: result.confirmationId,
+        reapplied: false,
       });
 
-      return { eventId, status: PayrollEventStatus.SUCCEEDED };
+      return {
+        eventId,
+        status: PayrollEventStatus.SUCCEEDED,
+        alreadyApplied,
+      };
     } catch (error) {
       return await this.handleFailure({
         error,
@@ -370,7 +402,7 @@ export class EventProcessor {
    */
   private async applyBusinessEffect(
     request: PayrollGatewayRequest,
-  ): Promise<PayrollGatewayResult> {
+  ): Promise<{ result: PayrollGatewayResult; alreadyApplied: boolean }> {
     assertValidPayload(request.eventType, request.payload);
 
     const existing = await this.prisma.appliedOperation.findUnique({
@@ -383,29 +415,51 @@ export class EventProcessor {
     });
 
     if (existing) {
-      // Already applied on a previous delivery. Replay the stored result so a
-      // retry is observably identical rather than double-charging.
-      return existing.result as unknown as PayrollGatewayResult;
+      // The ledger row exists, so a previous delivery already called the
+      // provider. Replay the stored result rather than calling again — this
+      // is the case where a crash landed BETWEEN the ledger commit and the
+      // job ack, so the effect happened but the event never reached SUCCEEDED.
+      return {
+        result: existing.result as unknown as PayrollGatewayResult,
+        alreadyApplied: true,
+      };
     }
 
     const result = await this.gateway.apply(request);
-
-    await this.prisma.appliedOperation.create({
-      data: {
-        eventId: request.eventId,
-        operationKey: APPLY_OPERATION_KEY,
-        result: result as never,
-      },
-    });
-
-    return result;
+    return { result, alreadyApplied: false };
   }
 
-  private async markSucceeded(
+  /**
+   * Commits the ledger row, the SUCCEEDED status and the audit entry in ONE
+   * transaction.
+   *
+   * These three writes must be atomic. Splitting them leaves a crash window in
+   * which the effect is recorded as applied but the event still reads
+   * PROCESSING (or worse, the event reads SUCCEEDED with no ledger row, so a
+   * redelivery would re-call the provider). Committing together means a crash
+   * either leaves all three absent — safe to retry from scratch — or all three
+   * present, which the terminal-status guard short-circuits.
+   *
+   * `skipLedger` is set when the ledger row was already written by an earlier
+   * delivery; the unique constraint would otherwise reject the insert and roll
+   * the whole transaction back.
+   */
+  private async commitSuccess(
     eventId: string,
     result: PayrollGatewayResult,
+    skipLedger: boolean,
   ): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
+      if (!skipLedger) {
+        await tx.appliedOperation.create({
+          data: {
+            eventId,
+            operationKey: APPLY_OPERATION_KEY,
+            result: result as never,
+          },
+        });
+      }
+
       await tx.payrollEvent.update({
         where: { id: eventId },
         data: {

@@ -441,7 +441,177 @@ aggregator.
 
 ---
 
-## 10. Enum parity between Prisma and the shared package
+## 10. Processing Consistency & Crash Recovery
+
+### The scenario
+
+> A worker receives an event, the payroll operation succeeds, DB changes are written, the
+> worker crashes before the job is acknowledged to BullMQ, and the event is later
+> redelivered.
+
+This is not an edge case — it is the *normal* consequence of at-least-once delivery.
+Any queue that guarantees "no lost messages" must sometimes deliver twice, because
+acknowledging and doing the work cannot themselves be atomic across two systems.
+
+The design goal is therefore **not** to prevent redelivery. It is to make redelivery
+harmless: *at-least-once delivery, at-most-once effect*.
+
+### The four failure windows
+
+Reading left to right through one job, a crash can land in four places:
+
+```
+  [1]          [2]                  [3]                [4]
+   |            |                    |                  |
+   v            v                    v                  v
+ claim  -->  call provider  -->  COMMIT(ledger +    -->  ack job
+             (money moves)      SUCCEEDED + history)     to BullMQ
+```
+
+| Crash at | State left behind | Recovery |
+|---|---|---|
+| **[1]** before the provider call | `PROCESSING`, no ledger row | Redelivery re-runs from scratch. Safe: nothing happened. |
+| **[2]** after the provider call, before commit | `PROCESSING`, no ledger row | Redelivery **re-calls the provider**. See "the honest gap" below. |
+| **[3]** mid-commit | Nothing — the transaction rolls back | Same as [1]. |
+| **[4]** after commit, before ack | `SUCCEEDED` + ledger row, job unacked | Redelivery short-circuits on the terminal status. **This is the scenario in the assignment.** |
+
+### The mechanism
+
+Three layers, each catching what the previous one misses:
+
+**1. Processing-marker check (first line of defence).**
+Before doing anything, the processor reads the event's current status. If it is already
+`SUCCEEDED` or `FAILED_PERMANENT`, it returns immediately — no provider call, no status
+write, no history row — and logs `duplicate delivery detected, skipping re-application`.
+This runs *before* `markProcessing`, so a duplicate delivery does not even perturb the
+row. It handles window **[4]**.
+
+**2. `applied_operations` ledger (authoritative guard).**
+Keyed `UNIQUE (event_id, operation_key)`. If the ledger row exists, the provider was
+already called, so the stored result is replayed instead of re-calling. This catches the
+nastier variant of [4] where the ledger committed but the status did not — the effect
+already happened, so the redelivery only *finishes the transition the dead worker never
+made*, preserving the original `confirmationId`.
+
+**3. Single atomic commit.**
+The ledger row, the `SUCCEEDED` status and the history entry are written in **one**
+`$transaction`. This was previously split across two transactions, which left a real
+window where the effect was recorded as applied but the event still read `PROCESSING`.
+Now a crash either leaves all three absent (safe to retry from scratch) or all three
+present (short-circuited by layer 1). There is no partial state.
+
+### Sequence: crash after DB write, before ack
+
+```mermaid
+sequenceDiagram
+    participant Q as BullMQ (Redis)
+    participant W1 as Worker A (crashes)
+    participant PG as Postgres
+    participant EXT as Payroll provider
+    participant W2 as Worker B
+
+    Q->>W1: deliver job (eventId)
+    W1->>PG: SELECT status → PENDING
+    W1->>PG: UPDATE status = PROCESSING (+history)
+    W1->>EXT: apply change
+    EXT-->>W1: confirmationId
+    W1->>PG: BEGIN
+    W1->>PG: INSERT applied_operations
+    W1->>PG: UPDATE status = SUCCEEDED
+    W1->>PG: INSERT history
+    W1->>PG: COMMIT ✅
+    Note over W1: 💥 crash before ack
+    Note over Q: lock expires (lockDuration)<br/>stalled check requeues job
+
+    Q->>W2: redeliver same job (eventId)
+    W2->>PG: SELECT status → SUCCEEDED
+    Note over W2: processing-marker check hits
+    W2--xEXT: provider NOT called
+    W2-->>Q: ack (alreadyApplied: true)
+    Note over W2: log: "duplicate delivery detected,<br/>skipping re-application"
+```
+
+### BullMQ stalled-job configuration
+
+| Setting | Value | Reasoning |
+|---|---|---|
+| `lockDuration` | 30s | Must exceed the slowest realistic job. The provider takes up to 3s and a job may also wait on its employee ordering lock. Too low and healthy long-running jobs get redelivered *while still executing* — two workers on one event. |
+| `stalledInterval` | 15s | Detection latency. A crashed job is reclaimed within roughly `lockDuration + stalledInterval` (~45s worst case). |
+| `maxStalledCount` | 2 | Caps how many times a job may stall before being failed. Without it, a poison message that reliably kills its worker cycles forever, taking a worker down each time. |
+
+Verified against a real Redis: worker A takes a job and is hard-killed, worker B is
+handed the *same* job and completes it. Critically, **`attemptsMade` stays 0 across a
+stall** — a stall is not a failed attempt and does not consume the retry budget. That
+means BullMQ offers no protection against re-running the effect; the idempotency layers
+above are the only thing standing between a crash and a double payment.
+
+### The recovery sweep
+
+BullMQ's stalled detection covers the common case, but it is blind to three situations
+where Postgres holds the truth and Redis does not:
+
+- the job exhausted `maxStalledCount` and was dropped;
+- Redis lost data (restart without persistence, failover, eviction) so the job no longer
+  exists;
+- the API committed the event but crashed before enqueueing it.
+
+The sweep finds events in `PROCESSING` whose `startedProcessingAt` is older than a
+configurable timeout (default 5 min), and **re-enqueues** them.
+
+**Why re-enqueue rather than mark `FAILED_TEMPORARY`.** A stuck event is evidence of a
+dead *worker*, not a bad *event*. The event may be perfectly valid and simply unlucky in
+which process picked it up. Marking it `FAILED_TEMPORARY` pushes a recoverable event
+into a state needing human attention — at any scale, that means an on-call queue full of
+events whose only fault was a rolling deploy.
+
+Re-enqueueing is safe *precisely because of* the idempotency guarantees above. Without
+them, re-enqueueing would risk double payment and `FAILED_TEMPORARY` would be the only
+responsible choice. This is a good example of how one guarantee unlocks a better
+operational posture elsewhere.
+
+The exception is the pathological case: an event that repeatedly kills its worker would
+be re-enqueued forever. After `MAX_RECOVERY_ATTEMPTS` (10) it is parked in
+`FAILED_TEMPORARY` — still re-triggerable by an operator, but no longer cycling.
+
+The sweep also **releases the dead worker's employee ordering lock**. Without that, the
+re-enqueued job would defer forever waiting on a lock held by a process that no longer
+exists. (The lock has a TTL, but the sweep should not have to wait for it.)
+
+It runs **in-process** on an interval, plus once at startup. Scheduling it as a queued
+job would be self-defeating: its whole purpose is recovering from a queue that may be
+empty or lost. It is idempotent and cheap, so several replicas running it concurrently
+is harmless — the row update serialises them.
+
+### The honest gap: window [2]
+
+If the worker crashes **after** the provider call but **before** the commit, the ledger
+row was never written, so a redelivery *will* call the provider again.
+
+This is unavoidable with a non-transactional external system: the provider call and the
+database commit cannot be made atomic without distributed transactions or provider-side
+idempotency. The mitigation in a real integration is to send our `eventId` as the
+provider's own idempotency key, pushing the dedup one hop downstream. The simulated
+gateway does not model that, so the gap is documented rather than hidden.
+
+Window [2] is also the narrowest: it spans the few milliseconds between the provider
+returning and the local commit, whereas window [4] spans the entire ack round trip.
+
+### What the tests prove
+
+- Redelivery of a `SUCCEEDED` event → provider called **0** additional times.
+- Ten sequential redeliveries → **1** provider call, **1** ledger row, **2** history rows
+  (the audit trail is byte-identical to a single clean run — no phantom entries).
+- Ledger row present but status `PROCESSING` (the crash-after-ledger case) → provider
+  **not** called, transition completed, **original** `confirmationId` preserved.
+- Transaction failure → **0** ledger rows, i.e. no partial state.
+- Real stalled-job recovery: worker A killed mid-job, worker B completes it, effect
+  applied exactly once.
+- Sweep re-enqueues stuck events, ignores fresh and terminal ones, parks poison events,
+  releases orphaned locks, and is safe to run repeatedly.
+
+---
+
+## 11. Enum parity between Prisma and the shared package
 
 Prisma generates its enums as string-literal unions; `@payroll/shared` exports real
 TypeScript enums. The values are identical but the types are not mutually assignable, so

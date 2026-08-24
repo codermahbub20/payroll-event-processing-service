@@ -20,9 +20,39 @@ export interface PayrollWorkerOptions extends EventProcessorOptions {
    */
   concurrency?: number;
   connection?: Redis;
+  /** How long a worker may hold a job's lock without renewing it. */
+  lockDuration?: number;
+  /** How often the worker scans for jobs whose lock expired. */
+  stalledInterval?: number;
+  /** How many times a job may stall before being failed outright. */
+  maxStalledCount?: number;
 }
 
 export const DEFAULT_CONCURRENCY = 10;
+
+/**
+ * Stalled-job detection settings.
+ *
+ * A job "stalls" when its owning worker stops renewing the lock — the process
+ * crashed, was OOM-killed, or lost its Redis connection. BullMQ then hands the
+ * job to another worker.
+ *
+ * `lockDuration` must comfortably exceed the slowest realistic job. The
+ * simulated provider can take up to 3s, and a job may also wait on its
+ * employee ordering lock, so 30s leaves generous headroom. Setting it too low
+ * causes healthy long-running jobs to be redelivered while still executing —
+ * two workers on one event.
+ *
+ * `stalledInterval` bounds detection latency: a crashed job is picked up
+ * within roughly lockDuration + stalledInterval.
+ *
+ * `maxStalledCount` caps how many times a job may stall before BullMQ fails it
+ * permanently. Without a cap, a job that reliably crashes its worker (a poison
+ * message) would cycle forever, taking a worker down each time.
+ */
+export const DEFAULT_LOCK_DURATION_MS = 30_000;
+export const DEFAULT_STALLED_INTERVAL_MS = 15_000;
+export const DEFAULT_MAX_STALLED_COUNT = 2;
 
 /**
  * BullMQ consumer for payroll events.
@@ -59,8 +89,23 @@ export class PayrollWorker {
       {
         connection: this.connection,
         concurrency: options.concurrency ?? DEFAULT_CONCURRENCY,
+        // Crash recovery: if this process dies mid-job, the lock expires and
+        // another worker picks the job up. Safe because the processor's
+        // terminal-status check and the applied_operations ledger make
+        // redelivery idempotent.
+        lockDuration: options.lockDuration ?? DEFAULT_LOCK_DURATION_MS,
+        stalledInterval: options.stalledInterval ?? DEFAULT_STALLED_INTERVAL_MS,
+        maxStalledCount: options.maxStalledCount ?? DEFAULT_MAX_STALLED_COUNT,
       },
     );
+
+    this.worker.on("stalled", (jobId) => {
+      // Worth a loud log: frequent stalls mean crashing workers or a
+      // lockDuration set below real job durations.
+      this.logger.warn(
+        `job ${jobId} stalled and was requeued for another worker`,
+      );
+    });
 
     this.worker.on("failed", (job, error) => {
       this.logger.error(
@@ -79,8 +124,15 @@ export class PayrollWorker {
     await this.worker.waitUntilReady();
   }
 
-  async close(): Promise<void> {
-    await this.worker.close();
+  /**
+   * Shuts the worker down.
+   *
+   * `force` skips waiting for in-flight jobs, which is what a crash looks
+   * like: locks are abandoned rather than released, so BullMQ's stalled
+   * detection has to reclaim the jobs. Used by the crash-recovery tests.
+   */
+  async close(force = false): Promise<void> {
+    await this.worker.close(force);
     if (this.ownsConnection) {
       await this.connection.quit();
     }
