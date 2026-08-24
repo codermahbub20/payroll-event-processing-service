@@ -1,28 +1,26 @@
 import { PayrollEventStatus } from "../enums/event-status.enum";
 import { PayrollEventType } from "../enums/payroll-event-type.enum";
 
-/** Type-specific payload shapes stored in `payroll_events.payload` (jsonb). */
+/**
+ * Type-specific payload shapes stored in `payroll_events.payload` (jsonb).
+ *
+ * `employeeId` and `effectiveDate` are common to every event type and live as
+ * real columns on `payroll_events`, so they are deliberately absent here.
+ */
 export interface BankAccountChangePayload {
-  accountNumber: string;
-  routingNumber: string;
-  accountHolderName: string;
-  bankName?: string;
+  iban: string;
 }
 
 export interface AddressChangePayload {
-  line1: string;
-  line2?: string;
+  street: string;
   city: string;
-  state: string;
   postalCode: string;
   country: string;
 }
 
 export interface SalaryChangePayload {
-  previousAnnualSalary?: number;
-  newAnnualSalary: number;
+  newSalary: number;
   currency: string;
-  reason?: string;
 }
 
 /** Discriminated union linking each event type to its payload. */
