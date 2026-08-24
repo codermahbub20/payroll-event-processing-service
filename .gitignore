@@ -5,3 +5,8 @@ dist/
 *.log
 .DS_Store
 coverage/
+
+# Scratch files from local tooling
+*-tmp.json
+*-tmp.txt
+*-tmp.js
