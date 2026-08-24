@@ -125,6 +125,20 @@ export class PayrollWorker {
   }
 
   /**
+   * True while the worker is consuming. Used by the health endpoint: a worker
+   * process that is alive but whose BullMQ consumer has closed would otherwise
+   * report healthy while doing no work.
+   */
+  isRunning(): boolean {
+    return this.worker.isRunning() && !this.worker.closing;
+  }
+
+  /** Underlying Redis connection, for health probes. */
+  getConnection(): Redis {
+    return this.connection;
+  }
+
+  /**
    * Shuts the worker down.
    *
    * `force` skips waiting for in-flight jobs, which is what a crash looks

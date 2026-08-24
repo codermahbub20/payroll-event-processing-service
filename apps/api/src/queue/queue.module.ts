@@ -5,6 +5,7 @@ import {
   EVENT_QUEUE,
   EventQueueProducer,
   PayrollEventJobData,
+  QueueHealth,
 } from "./event-queue.constants";
 
 /**
@@ -19,6 +20,20 @@ class NoopEventQueue implements EventQueueProducer {
     this.logger.warn(
       `REDIS_URL not configured — event ${data.eventId} was persisted but NOT enqueued`,
     );
+  }
+
+  /**
+   * Reports "not configured" rather than "healthy". A deploy missing REDIS_URL
+   * is broken, and health must say so instead of showing green while events
+   * pile up unprocessed.
+   */
+  async checkHealth(): Promise<QueueHealth> {
+    return {
+      configured: false,
+      redis: false,
+      queue: false,
+      error: "REDIS_URL is not configured",
+    };
   }
 }
 

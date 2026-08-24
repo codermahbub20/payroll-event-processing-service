@@ -25,6 +25,11 @@ class RecordingQueue implements EventQueueProducer {
     if (this.shouldThrow) throw new Error("redis unavailable");
     this.jobs.push(data);
   }
+
+  /** Always healthy: these suites exercise the event path, not health. */
+  async checkHealth() {
+    return { configured: true, redis: true, queue: true };
+  }
 }
 
 const VALID_IBAN = "DE89370400440532013000";

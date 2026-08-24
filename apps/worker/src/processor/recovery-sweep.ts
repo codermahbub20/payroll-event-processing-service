@@ -85,7 +85,7 @@ export class RecoverySweep {
   ) {
     this.stuckTimeoutMs = options.stuckTimeoutMs ?? DEFAULT_STUCK_TIMEOUT_MS;
     this.batchSize = options.batchSize ?? DEFAULT_SWEEP_BATCH_SIZE;
-    this.logger = options.logger ?? new StructuredLogger();
+    this.logger = options.logger ?? new StructuredLogger({ service: "payroll-worker", context: "RecoverySweep" });
     this.now = options.now ?? (() => new Date());
   }
 

@@ -611,7 +611,110 @@ returning and the local commit, whereas window [4] spans the entire ack round tr
 
 ---
 
-## 11. Enum parity between Prisma and the shared package
+## 11. Observability: health, logging, error shape
+
+### `GET /health` — custom, not Terminus
+
+A lightweight implementation was chosen over `@nestjs/terminus`. Terminus is a good fit
+when its bundled indicators cover your dependencies, but the queue check here needs to
+reach into the *existing* `BullEventQueue` provider — the same connection the producer
+uses. Wrapping that in a Terminus indicator adds an adapter layer and a dependency to
+express roughly the same thing the service already does in ~40 lines. Terminus also has
+no BullMQ indicator, so that half would be custom regardless.
+
+**Redis and BullMQ are probed separately.** A `PING` proves the server is up; it does
+*not* prove the queue is usable — a wrong database index, evicted keys, or a Lua script
+that will not load all leave Redis answering PING while BullMQ is broken. The queue
+probe therefore asks for job counts, exercising the path the producer actually uses.
+There is a test pinning the "Redis up, queue down" case.
+
+**Every dependency is critical**, so any failure yields 503. Without Postgres the API
+cannot accept events; without Redis accepted events are never processed. Reporting 200
+while either is down would let a load balancer keep routing traffic into a service that
+silently drops work.
+
+**Probes run concurrently with a 3s timeout.** Serial probes would take the sum of the
+timeouts, and a health endpoint slower than the load balancer's own timeout is worse than
+useless — the probe is killed and the instance looks dead anyway. There is a test that
+asserts the endpoint answers in under 6s even when a probe never settles.
+
+**An unconfigured queue reports down, not up.** A deploy missing `REDIS_URL` is broken;
+health must say so rather than showing green while events pile up unprocessed.
+
+The 200 and 503 bodies are identical in shape, because an operator debugging a 503 needs
+the same breakdown as one confirming a 200.
+
+### Worker health: HTTP, not a heartbeat file
+
+The worker has no HTTP surface of its own, so a heartbeat file (touch a file each loop,
+probe its mtime) is the cheaper option. HTTP was chosen anyway:
+
+- **It matches how the worker is run.** Compose `healthcheck` and Kubernetes
+  `livenessProbe` speak HTTP natively. A file check needs `exec` into the container —
+  slower, needs a shell in the image, and reports less.
+- **A heartbeat proves the wrong thing.** It says the process loop is alive. It cannot
+  say Postgres is reachable or the BullMQ consumer is still connected — a worker looping
+  happily while unable to reach its database is exactly the failure an operator needs to
+  see, and a heartbeat reports it green.
+- **Files lie across restarts.** A stale file outlives the process that wrote it; a probe
+  reading a recent-enough mtime declares health while nothing is running. Fixing that
+  needs PID-liveness logic that HTTP gets for free — if nothing is listening, the probe
+  fails.
+
+The cost is one listening socket serving a single route. Both services now have compose
+healthchecks wired to their endpoints.
+
+The worker's check includes `isWorkerRunning()`, because a process whose BullMQ consumer
+has closed is still a live process — and would otherwise report healthy while doing no
+work at all.
+
+### Structured logging in `@payroll/shared`
+
+One `StructuredLogger` implementation, used by both services, emitting:
+
+```json
+{"timestamp":"…","level":"info","service":"payroll-api","context":"EventsService",
+ "event":"processing_succeeded","eventId":"…","employeeId":"…","message":"…"}
+```
+
+It lives in `@payroll/shared` rather than being implemented twice so that **one query
+works across the whole pipeline**. `eventId` correlates every line about a payroll event
+from HTTP submission through to worker completion — which is the point of structured
+logging here, and is lost the moment the two services drift on field names.
+
+Output goes straight to stdout, not through Nest's `Logger`, whose formatter wraps
+records in ANSI colour codes and a prefix that make the JSON unparseable. Nest's *own*
+framework output is redirected through a `LoggerService` adapter for the same reason:
+otherwise a single process emits two formats, and the framework half — carrying the
+startup failures worth alerting on — is the unparseable one.
+
+`packages/shared` deliberately carries no `@types/node`, so `console` and `process` are
+reached via `globalThis`. Adding the types would let Node-only APIs leak into a package
+the frontend may eventually import.
+
+### Global exception filter
+
+Every failure returns one shape:
+
+```json
+{"statusCode":404,"error":"Not Found","message":"Event abc not found",
+ "timestamp":"…","path":"/events/abc"}
+```
+
+**Stack traces are logged, never returned.** The original message of an unhandled error
+is withheld too — it can carry connection strings, SQL fragments, or payload data. The
+response says `"An unexpected error occurred"` while the log keeps the full stack. There
+is a test asserting a thrown error containing a credentials-shaped connection string
+appears in the log and *not* in the response body.
+
+Deliberate `HttpException`s keep their message (they were written for the caller), and a
+validation body's `details` array is preserved rather than flattened.
+
+4xx logs at `warn`, 5xx at `error` — only 5xx is our fault and worth alerting on.
+
+---
+
+## 12. Enum parity between Prisma and the shared package
 
 Prisma generates its enums as string-literal unions; `@payroll/shared` exports real
 TypeScript enums. The values are identical but the types are not mutually assignable, so

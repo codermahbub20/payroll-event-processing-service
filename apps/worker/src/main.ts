@@ -15,6 +15,7 @@ import {
   RecoverySweep,
   ScheduledRecoverySweep,
 } from "./processor/recovery-sweep";
+import { WorkerHealthServer } from "./health/health-server";
 import { WorkerModule } from "./worker.module";
 
 /** Reads a numeric env var, falling back when unset or unparseable. */
@@ -86,6 +87,15 @@ async function bootstrap() {
     );
   }
 
+  // Health endpoint. See health-server.ts for why HTTP over a heartbeat file.
+  const healthServer = new WorkerHealthServer({
+    port: numberFromEnv("WORKER_HEALTH_PORT", 3001),
+    prisma,
+    redis: worker.getConnection(),
+    isWorkerRunning: () => worker.isRunning(),
+  });
+  await healthServer.start();
+
   logger.log(`worker started (concurrency=${concurrency})`);
 
   // Drain in-flight jobs before exiting so a deploy does not abandon work
@@ -93,6 +103,7 @@ async function bootstrap() {
   const shutdown = async (signal: string) => {
     logger.log(`${signal} received; draining`);
     scheduledSweep.stop();
+    await healthServer.stop();
     await worker.close();
     await sweepProducer.close();
     await sweepConnection.quit();

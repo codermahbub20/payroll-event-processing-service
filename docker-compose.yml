@@ -52,6 +52,12 @@ services:
       PORT: ${PORT:-3000}
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,6 +77,13 @@ services:
       # Jobs processed in parallel across DIFFERENT employees. Ordering within
       # one employee is enforced by the Redis lock, not by this value.
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-10}
+      WORKER_HEALTH_PORT: 3001
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy

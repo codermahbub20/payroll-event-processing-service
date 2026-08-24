@@ -17,6 +17,11 @@ class NoopQueue implements EventQueueProducer {
   async enqueueEvent(_data: PayrollEventJobData): Promise<void> {
     /* no broker needed for read-path tests */
   }
+
+  /** Always healthy: these suites exercise the event path, not health. */
+  async checkHealth() {
+    return { configured: true, redis: true, queue: true };
+  }
 }
 
 describe("GET /events and GET /events/:id (e2e)", () => {

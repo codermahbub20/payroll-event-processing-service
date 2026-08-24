@@ -14,6 +14,11 @@ import {
 
 class NoopQueue implements EventQueueProducer {
   async enqueueEvent(_data: PayrollEventJobData): Promise<void> {}
+
+  /** Always healthy: these suites exercise the event path, not health. */
+  async checkHealth() {
+    return { configured: true, redis: true, queue: true };
+  }
 }
 
 /**

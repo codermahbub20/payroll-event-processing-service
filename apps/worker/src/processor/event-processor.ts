@@ -56,7 +56,7 @@ export class EventProcessor {
   ) {
     this.requeueDelayMs = options.requeueDelayMs ?? 50;
     this.gateway = options.gateway ?? new SimulatedPayrollGateway();
-    this.logger = options.logger ?? new StructuredLogger();
+    this.logger = options.logger ?? new StructuredLogger({ service: "payroll-worker", context: "EventProcessor" });
   }
 
   async process(
