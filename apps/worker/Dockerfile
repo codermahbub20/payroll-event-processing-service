@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1
 
 FROM node:20-alpine AS base
-RUN corepack enable
+# Pin pnpm. `corepack enable` on its own resolves to the newest pnpm, which is
+# 11.x and requires the node:sqlite builtin that Node 20 does not ship — the
+# build then dies with ERR_UNKNOWN_BUILTIN_MODULE. Corepack cannot read the
+# `packageManager` field here because package.json is not yet in this layer,
+# so the version is stated explicitly. Keep it in step with package.json.
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /workspace
 
 # ---- deps: install full workspace deps (needed to resolve workspace:* links) ----
